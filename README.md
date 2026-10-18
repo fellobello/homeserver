@@ -83,9 +83,12 @@ Every image is pinned to an exact tag. Upgrading is: bump the tag, `docker compo
 - **Backups snapshot live databases** through SQLite's online backup API instead of copying
   files mid-write, and every archive is verified after it's written.
 
-The full reasoning is in the explainer pages in [`docs/`](docs/). Open them in a browser:
-[architecture](docs/architecture.html), [networking](docs/networking.html),
-[wiring diagram](docs/wiring-diagram.html), [operating manual](docs/operating-manual.html).
+The full reasoning is in the explainer pages ([`docs/`](docs/), rendered at
+[fellobello.github.io/homeserver](https://fellobello.github.io/homeserver/)):
+[architecture](https://fellobello.github.io/homeserver/architecture.html),
+[networking](https://fellobello.github.io/homeserver/networking.html),
+[wiring diagram](https://fellobello.github.io/homeserver/wiring-diagram.html),
+[operating manual](https://fellobello.github.io/homeserver/operating-manual.html).
 
 ## Scripts
 
