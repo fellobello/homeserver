@@ -1,0 +1,17 @@
+# Closes a TODO open since 2026-08-24: bin/homie-backup existed but nothing ran it.
+# Matters more now — .env holds N8N_ENCRYPTION_KEY, and losing that means every stored
+# credential becomes unrecoverable ciphertext.
+[Unit]
+Description=homie — back up school-work and the homeserver config to the T7
+Documentation=file:/home/admin/homeserver/README.md
+RequiresMountsFor=/mnt/t7
+
+[Service]
+Type=oneshot
+User=admin
+Group=admin
+ExecStart=/home/admin/homeserver/bin/homie-backup
+# The script itself refuses to run if /mnt/t7 is not mounted, so a missing T7 is a clean
+# failure rather than 400 GB written into the root filesystem.
+Nice=10
+IOSchedulingClass=idle

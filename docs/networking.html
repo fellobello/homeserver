@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>homie — networking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="homie.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="nav">
+  <a class="nav-home" href="index.html">homie docs</a>
+  <a href="operating-manual.html">Operating manual</a>
+  <a href="architecture.html">Architecture</a>
+  <a href="networking.html" aria-current="page">Networking</a>
+  <a href="wiring-diagram.html">Wiring diagram</a>
+</nav>
+
+<header class="masthead">
+  <div class="eyebrow">How traffic actually gets there</div>
+  <h1>Networking</h1>
+  <p class="standfirst">
+    Four ideas, then two ordinary requests traced hop by hop — then the two things that
+    are genuinely confusing: how the downloader is sealed inside a VPN, and why nobody on
+    the internet can start a connection to your house.
+  </p>
+</header>
+
+<section id="ideas">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Four ideas, then the traces</h2></div>
+  <p>Everything below is built from these. None are complicated once the metaphor lands.</p>
+
+  <div class="cards cards-2">
+    <div class="card">
+      <span class="tag">Idea one</span>
+      <h3>An address plus a port</h3>
+      <p>
+        The address says which machine; the port says which program on it. Street address
+        and apartment number. One machine runs dozens of programs, each listening on its
+        own port, all sharing one address.
+      </p>
+      <p class="mono" style="font-size:13px">192.168.1.10:8096<br>└ the machine ┘ └ Jellyfin ┘</p>
+    </div>
+
+    <div class="card">
+      <span class="tag tag-tailnet">Idea two</span>
+      <h3>A tunnel — Tailscale</h3>
+      <p>
+        Your Mac and homie each hold an <em>outbound</em> connection to Tailscale’s
+        coordination service. Because both reached out, they can be introduced and then
+        talk directly, encrypted end to end. No incoming port ever opens on your router,
+        because nothing ever knocks on it from outside.
+      </p>
+      <p class="mono" style="font-size:13px">homie   100.64.0.10<br>the Mac 100.64.0.20</p>
+    </div>
+
+    <div class="card">
+      <span class="tag">Idea three</span>
+      <h3>A reverse proxy — Caddy</h3>
+      <p>
+        A receptionist for the building. Visitors only ever speak to reception; reception
+        walks the message to the right office and brings the answer back. The offices
+        never talk to the public. One desk, one set of rules, one place that handles
+        security — instead of every service improvising its own.
+      </p>
+      <p class="mono" style="font-size:13px">you → caddy:443  → jellyfin:8096<br>you → caddy:8443 → syncthing:8384</p>
+    </div>
+
+    <div class="card">
+      <span class="tag tag-ok">Idea four</span>
+      <h3>A certificate — HTTPS</h3>
+      <p>
+        Two jobs at once. It scrambles the conversation so nobody in between can read it,
+        and it <em>proves identity</em> — that the server answering really is the one you
+        asked for. The padlock means both happened. A certificate is a signed statement
+        from an authority your device already trusts.
+      </p>
+      <p class="mono" style="font-size:13px">issuer:  Let’s Encrypt<br>subject: homie.tailnet-name.ts.net</p>
+    </div>
+  </div>
+
+  <div class="note note-info">
+    <span class="lbl">Why the proxy earns its place</span>
+    <p>
+      Without Caddy, every service handles its own encryption, its own certificate
+      renewal and its own exposure — and each does it differently, badly, or not at all.
+      With Caddy, encryption is solved once, at the door. Behind it, services speak plain
+      HTTP to each other on a private network no outsider can reach, which is fine,
+      because the dangerous part of the journey already ended at reception.
+    </p>
+    <p>
+      That prediction has been tested twice since. Adding the downloader was one Caddy
+      block and one more port on the existing certificate; adding n8n was the same again.
+      Neither was a fresh security decision.
+    </p>
+  </div>
+</section>
+
+<section id="trace-ssh">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Trace one — school files, from the Mac</h2></div>
+  <p>
+    You are at a coffee shop and want a file from <code>~/data/school-work</code>. You
+    type <code>ssh admin@homie.tailnet-name.ts.net</code>.
+  </p>
+  <p>
+    <strong>The surprise: neither Caddy nor Docker is involved at any point.</strong>
+    Worth following, because it clarifies what each is actually for.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <h4>On your Mac — the name resolves privately</h4>
+      <p>
+        Tailscale intercepts the lookup for <code>homie.tailnet-name.ts.net</code> and
+        answers <code>100.64.0.10</code> itself. This name does not exist on the public
+        internet; ask any normal DNS server and you get nothing.
+      </p>
+    </li>
+    <li>
+      <h4>Between the machines — a direct encrypted path is negotiated</h4>
+      <p>
+        Both already hold outbound connections to Tailscale’s coordination service, so
+        they can be introduced and then punch a path straight to each other. Everything is
+        encrypted with WireGuard before it leaves the Mac. The coffee shop, your ISP and
+        Tailscale itself carry sealed traffic they cannot read. If no direct path can be
+        found, an encrypted relay is used instead — slower, still private.
+      </p>
+    </li>
+    <li>
+      <h4>Arriving at homie — it lands on <code>tailscale0</code></h4>
+      <p>
+        homie has two interfaces: <code>wlp4s0</code> facing the house and
+        <code>tailscale0</code> facing the tailnet. This traffic arrives on
+        <code>tailscale0</code>, is decrypted, and is addressed to port 22.
+      </p>
+    </li>
+    <li>
+      <h4>On homie — SSH answers, and you get the files</h4>
+      <p>
+        ufw permits SSH on every interface, so it passes; your identity is proven with a
+        key rather than a password. <strong>sshd runs on the host, not in a
+        container</strong> — so no Docker networking, no port publishing, no Caddy.
+        <code>~/data/school-work</code> is an ordinary directory on the disk. Copy with
+        <code>scp</code> or <code>sftp</code> and you are done.
+      </p>
+    </li>
+    <li>
+      <h4>Meanwhile, separately — Syncthing is watching that same directory</h4>
+      <p>
+        That folder is also shared into the Syncthing container. Anything you drop there
+        gets picked up and synced to your other devices — not because SSH told it to, but
+        because it is the same folder on disk viewed from two places.
+      </p>
+    </li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">The takeaway</span>
+    <p>
+      Caddy handles <em>web</em> traffic. SSH is not web traffic, so it goes straight to
+      the host and skips the proxy entirely. Tailscale is what makes the machine
+      reachable at all; Caddy is what makes browser traffic to it encrypted and tidy.
+      Different problems, easy to confuse.
+    </p>
+  </div>
+</section>
+
+<section id="trace-media">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Trace two — a download, then the living room TV</h2></div>
+  <p>
+    <span class="tag tag-tailnet">tailnet</span>
+    <span class="tag tag-lan">LAN</span>
+    <span class="tag">VPN tunnel</span>
+  </p>
+  <p>
+    One file’s whole life: requested from a laptop over the tunnel, downloaded through a
+    VPN, filed onto disk, then played on a TV that reaches the server a completely
+    different way.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <h4>You open the downloader from your laptop</h4>
+      <p>
+        Its control panel sits behind Caddy on the tailnet at port 8444, exactly like
+        Syncthing’s — reachable by you from anywhere, invisible to everyone in the house.
+        From the house WiFi the address returns nothing at all.
+      </p>
+      <p>
+        It needed one thing Jellyfin and Syncthing did not. qBittorrent checks that the
+        port in the browser’s <code>Host</code> header matches the port it is itself
+        listening on, and rejects the request when they differ — which is exactly what a
+        proxy on a different port causes. So Caddy rewrites three headers
+        (<code>Host</code>, <code>Origin</code>, <code>Referer</code>) to
+        <code>http://homie.tailnet-name.ts.net:8080</code>, the origin qBittorrent believes
+        it serves. Both of its protections stay switched on. Your browser is still on
+        HTTPS at 8444; only the internal hop is rewritten.
+      </p>
+    </li>
+    <li>
+      <h4>The download leaves through a VPN, not your home connection</h4>
+      <p>
+        Every packet qBittorrent sends leaves through a WireGuard tunnel to a NordVPN
+        server, and the address every peer in the swarm records is Nord’s, never the
+        house’s. <a href="#vpn">§04</a> is how that is enforced.
+      </p>
+    </li>
+    <li>
+      <h4>The finished file lands in the media folder, correctly named</h4>
+      <p>
+        The downloader writes into <code>/mnt/t7/…</code> through a writable bind.
+        Jellyfin’s view of that same folder is read-only — one directory, two containers,
+        different permissions, deliberately.
+      </p>
+      <p>
+        Naming decides whether any of this works. A release arrives as
+        <code>Harbor.Town.S02E03.1080p.WEB-DL.x265-GROUP.mkv</code>, which Jellyfin cannot
+        identify. On completion qBittorrent runs a script that rewrites it to
+        <code>Harbor Town (2022) - S02E03.mkv</code> and moves it into place — and because
+        downloads and library share one drive, that move is an instant rename that copies
+        no bytes.
+      </p>
+      <p>
+        <strong>The script refuses to guess.</strong> A release it cannot confidently
+        identify is left exactly where it is, with the reason written to
+        <code>config/qbittorrent/qbt-file.log</code>. A file that waits is a minute’s
+        work; a file misnamed into the wrong show is not.
+      </p>
+    </li>
+    <li>
+      <h4>Jellyfin notices on its next scan</h4>
+      <p>
+        It works out what the file is and fetches artwork and details from the internet.
+        This is Jellyfin reaching <em>out</em>; nothing reached in.
+      </p>
+    </li>
+    <li>
+      <h4>The TV connects straight to homie — no proxy, no tunnel</h4>
+      <p>
+        The TV opens the Jellyfin app and connects to <code>192.168.1.10:8096</code> over
+        the house WiFi. It is not on the tailnet and does not go through Caddy. This is
+        the shared door, and it is plain HTTP — putting the TV behind Caddy would mean
+        installing a certificate on it and on every roommate device.
+      </p>
+    </li>
+    <li>
+      <h4>Docker hands the connection to the container</h4>
+      <p>
+        Jellyfin does not sit on the network directly; it lives on a private Docker
+        network, and Docker forwards anything arriving on the host’s port 8096 into the
+        container. That forwarding is also why the firewall cannot be trusted to protect
+        container ports, and why each port is pinned to a specific address instead.
+      </p>
+    </li>
+    <li>
+      <h4>Playback: ship it as-is, or convert it on the fly</h4>
+      <p>
+        If the TV can handle the file’s format, Jellyfin ships the bytes untouched —
+        cheap, and the best outcome. If not, it converts while playing, on the laptop’s
+        built-in video engine rather than the CPU. On a four-thread machine what matters
+        is that the work lands on dedicated silicon instead of eating every core.
+        <code>homie-check</code> reports which one a live playback is actually using.
+      </p>
+    </li>
+    <li>
+      <h4>And at the same time — you can watch the same library over the tunnel</h4>
+      <p>
+        From outside the house you reach Jellyfin at
+        <code>https://homie.tailnet-name.ts.net</code> — through the tunnel, through Caddy,
+        fully encrypted. Same server, same library, different door. The two paths coexist
+        without either knowing about the other.
+      </p>
+    </li>
+  </ol>
+</section>
+
+<section id="vpn">
+  <div class="sec-head"><span class="sec-num">04</span><h2>How the downloader is sealed in</h2></div>
+  <p>
+    qBittorrent has <strong>no network of its own.</strong> It shares Gluetun’s entirely —
+    one Linux network namespace, so the only interfaces it can see are loopback and
+    <code>tun0</code>, the mouth of a WireGuard tunnel to a NordVPN server.
+  </p>
+
+  <figure>
+    <div class="figwrap">
+    <svg class="diagram" viewBox="0 0 900 260" role="img"
+         aria-label="Diagram. A dashed box labelled shared network namespace contains two programs, gluetun and qBittorrent. A single arrow labelled tun0 WireGuard leaves the box toward a NordVPN exit server and on to the peer swarm. A second short arrow labelled replies only goes from the namespace back to Caddy on the Docker bridge. No other path leaves the box.">
+      <rect class="d-zone" x="20" y="44" width="330" height="150" rx="10"/>
+      <text class="d-zonelbl" x="32" y="36">shared network namespace</text>
+
+      <rect class="d-box d-box-t" x="44" y="70" width="130" height="46" rx="6"/>
+      <text class="d-name" x="60" y="92">gluetun</text>
+      <text class="d-sub"  x="60" y="107">holds the tunnel</text>
+
+      <rect class="d-box d-box-t" x="196" y="70" width="130" height="46" rx="6"/>
+      <text class="d-name" x="212" y="92">qBittorrent</text>
+      <text class="d-sub"  x="212" y="107">no interfaces</text>
+
+      <rect class="d-box" x="44" y="140" width="282" height="34" rx="6"/>
+      <text class="d-sub" x="60" y="161">lo · tun0 10.5.0.2 — and nothing else</text>
+
+      <path class="d-line d-line-t" d="M350 100 H 520" marker-end="url(#nk-t)"/>
+      <text class="d-edge d-edge-t" x="366" y="92">tun0 · WireGuard</text>
+
+      <rect class="d-box d-box-t" x="524" y="76" width="150" height="46" rx="6"/>
+      <text class="d-name" x="540" y="98">NordVPN exit</text>
+      <text class="d-sub"  x="540" y="113">US · P2P server</text>
+
+      <path class="d-line d-line-t" d="M674 100 H 800" marker-end="url(#nk-t)"/>
+      <rect class="d-box" x="804" y="76" width="82" height="46" rx="6"/>
+      <text class="d-name" x="818" y="98">the swarm</text>
+      <text class="d-sub"  x="818" y="113">sees Nord</text>
+
+      <path class="d-line d-line-d d-dash" d="M350 160 H 520" marker-end="url(#nk-d)"/>
+      <text class="d-edge d-edge-d" x="366" y="152">replies to private ranges only</text>
+      <rect class="d-box d-box-d" x="524" y="140" width="150" height="40" rx="6"/>
+      <text class="d-name" x="540" y="165">Caddy · the LAN</text>
+
+      <text class="d-sub" x="20" y="226">There is no third arrow. If the tunnel dies, nothing leaves — not a fallback, an absence.</text>
+
+      <defs>
+        <marker id="nk-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--tailnet)"/>
+        </marker>
+        <marker id="nk-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--disk)"/>
+        </marker>
+      </defs>
+    </svg>
+    </div>
+    <figcaption>
+      The privacy mechanism is a <em>containment</em> change, not a setting. qBittorrent
+      cannot leak because there is nothing to leak through.
+    </figcaption>
+  </figure>
+
+  <p>
+    This is a kill switch by construction. If the VPN drops, qBittorrent does not fall
+    back to the ordinary connection — it has no interface to fall back to. Tested by
+    stopping Gluetun with a download running: traffic stopped, and so did DNS.
+  </p>
+
+  <h3>The mechanism is not the one you would guess</h3>
+  <p>
+    It does not work by replacing the default route. Inside the namespace the default
+    route still points at the Docker bridge. What diverts internet-bound traffic is a
+    <strong>policy rule at priority 101 matching WireGuard’s firewall mark</strong>. You
+    can watch the kernel decide:
+  </p>
+<pre><code>$ docker exec gluetun ip route get 1.1.1.1
+1.1.1.1 dev tun0 table 51820 src 10.5.0.2
+
+$ docker exec gluetun ip route get 172.18.0.2
+172.18.0.2 dev eth0 src 172.18.0.5</code></pre>
+  <p>
+    Two other details cost time and are worth keeping: Gluetun names the interface
+    <code>tun0</code> even on WireGuard, not <code>wg0</code>; and Nord permits P2P only
+    on certain servers, so <code>SERVER_CATEGORIES=P2P</code> constrains every pick
+    including reconnects. <code>SERVER_COUNTRIES=United States</code> was added after a
+    reconnect landed in Edinburgh and every peer round trip crossed the Atlantic.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">The consequence nobody warns you about</span>
+    <p>
+      The kill switch drops anything leaving that is not going out the tunnel — and
+      qBittorrent’s <em>reply</em> to Caddy is a packet leaving for a Docker address, not
+      the tunnel. So the request arrives, the answer is dropped, and the page just hangs,
+      looking exactly like a broken VPN.
+    </p>
+    <p>
+      The fix is to name the private ranges as allowed exceptions:
+      <code>FIREWALL_OUTBOUND_SUBNETS=172.18.0.0/16,100.64.0.0/10,192.168.1.0/24</code> —
+      the Docker bridge, the tailnet and the LAN. None can reach the public internet, so
+      nothing is weakened; a real internet destination still has exactly one road.
+    </p>
+  </div>
+
+  <div class="note note-warn">
+    <span class="lbl">Restarting Gluetun orphans qBittorrent — always both, always in order</span>
+    <p>
+      A namespace binding is fixed when a container is <em>created</em>. Recreate Gluetun
+      and qBittorrent is left in an empty namespace holding only loopback: alive, looking
+      fine, connected to nothing. After any Gluetun change, recreate both —
+      <a href="operating-manual.html#restart">Operating manual §08</a> has the commands,
+      and <code>homie-check</code> catches it if you forget.
+    </p>
+  </div>
+</section>
+
+<section id="inbound">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Why nobody can call you</h2></div>
+  <p>
+    This is the part that stays fuzzy longest, so it gets its own section. The thing to
+    hold on to: <strong>who starts the conversation determines everything.</strong>
+  </p>
+  <p>
+    Your router runs NAT. It has one public address and a table of ongoing conversations.
+    When homie sends a packet out, the router writes a row — <em>this inside address and
+    port is talking to that outside address and port</em> — rewrites the source to the
+    public IP, and sends it. Replies matching that row get translated back and delivered.
+    Replies matching no row have no destination inside the house, so they are dropped:
+    the router cannot know which of your devices they were for.
+  </p>
+
+  <figure>
+    <div class="figwrap">
+    <svg class="diagram" viewBox="0 0 960 330" role="img"
+         aria-label="Three panels. A: you start the connection — qBittorrent to the router, which writes a NAT row, out to a peer; data flows both ways on that one connection. B: a stranger starts it — a peer sends to your public address, the router finds no matching row and drops the packet. C: a provider-side port forward — a peer connects to a public port on the VPN server, which pushes it down the tunnel you already opened, surfacing inside the namespace; your router only ever sees more bytes on a conversation it already approved.">
+
+      <!-- PANEL A -->
+      <text class="d-zonelbl" x="16" y="22" style="fill:var(--disk)">A · you start it — works, needs no configuration</text>
+      <rect class="d-box d-box-d" x="16" y="34" width="132" height="44" rx="6"/>
+      <text class="d-name" x="30" y="55">qBittorrent</text>
+      <text class="d-sub"  x="30" y="70">:49312</text>
+      <path class="d-line d-line-d" d="M148 56 H 232" marker-end="url(#nb-d)"/>
+      <rect class="d-box" x="236" y="34" width="238" height="44" rx="6"/>
+      <text class="d-name" x="250" y="55">router writes a NAT row</text>
+      <text class="d-sub"  x="250" y="70">.170:49312 → 203.0.113.5:6881</text>
+      <path class="d-line d-line-d" d="M474 56 H 558" marker-end="url(#nb-d)"/>
+      <rect class="d-box d-box-d" x="562" y="34" width="120" height="44" rx="6"/>
+      <text class="d-name" x="576" y="55">a peer</text>
+      <text class="d-sub"  x="576" y="70">203.0.113.5</text>
+      <path class="d-line d-line-d d-dash" d="M562 72 H 478" marker-end="url(#nb-d)"/>
+      <text class="d-edge d-edge-d" x="700" y="50">data flows BOTH ways on</text>
+      <text class="d-edge d-edge-d" x="700" y="64">this one connection —</text>
+      <text class="d-edge d-edge-d" x="700" y="78">you upload here too</text>
+
+      <line x1="16" y1="100" x2="944" y2="100" stroke="var(--rule)" stroke-width="1"/>
+
+      <!-- PANEL B -->
+      <text class="d-zonelbl" x="16" y="128" style="fill:var(--alert)">B · a stranger starts it — dropped, and that is the default everywhere</text>
+      <rect class="d-box d-box-a" x="16" y="140" width="132" height="44" rx="6"/>
+      <text class="d-name" x="30" y="161">a peer</text>
+      <text class="d-sub"  x="30" y="176">wants to connect</text>
+      <path class="d-line d-line-a" d="M148 162 H 232" marker-end="url(#nb-a)"/>
+      <rect class="d-box" x="236" y="140" width="238" height="44" rx="6"/>
+      <text class="d-name" x="250" y="161">router looks for a matching row</text>
+      <text class="d-sub"  x="250" y="176">finds none — which device was it for?</text>
+      <path class="d-line d-line-a" d="M474 162 H 540"/>
+      <text x="548" y="168" style="font:700 17px var(--disp); fill:var(--alert)">✕</text>
+      <text class="d-edge d-edge-a" x="700" y="156">no forwarded port, so</text>
+      <text class="d-edge d-edge-a" x="700" y="170">the packet is discarded.</text>
+      <text class="d-edge d-edge-a" x="700" y="184">Downloads are unaffected.</text>
+
+      <line x1="16" y1="206" x2="944" y2="206" stroke="var(--rule)" stroke-width="1"/>
+
+      <!-- PANEL C -->
+      <text class="d-zonelbl" x="16" y="234" style="fill:var(--tailnet)">C · a provider-side forward — why it “bypasses” your router</text>
+      <rect class="d-box d-box-t" x="16" y="246" width="132" height="44" rx="6"/>
+      <text class="d-name" x="30" y="267">a peer</text>
+      <text class="d-sub"  x="30" y="282">dials 45.x.x.x:54321</text>
+      <path class="d-line d-line-t" d="M148 268 H 232" marker-end="url(#nb-t)"/>
+      <rect class="d-box d-box-t" x="236" y="246" width="238" height="44" rx="6"/>
+      <text class="d-name" x="250" y="267">VPN server holds the public port</text>
+      <text class="d-sub"  x="250" y="282">pushes it down the tunnel you opened</text>
+      <path class="d-line d-line-t" d="M474 268 H 558" marker-end="url(#nb-t)"/>
+      <rect class="d-box d-box-t" x="562" y="246" width="120" height="44" rx="6"/>
+      <text class="d-name" x="576" y="267">qBittorrent</text>
+      <text class="d-sub"  x="576" y="282">inside the namespace</text>
+      <text class="d-edge d-edge-t" x="700" y="262">your router sees only more</text>
+      <text class="d-edge d-edge-t" x="700" y="276">bytes on a conversation it</text>
+      <text class="d-edge d-edge-t" x="700" y="290">already approved</text>
+
+      <defs>
+        <marker id="nb-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--disk)"/>
+        </marker>
+        <marker id="nb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--alert)"/>
+        </marker>
+        <marker id="nb-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--tailnet)"/>
+        </marker>
+      </defs>
+    </svg>
+    </div>
+    <figcaption>
+      Panel C is why a provider-side forward is a genuine solution rather than a
+      workaround: it gives you a reachable public port without punching a hole in your own
+      perimeter. NordVPN does not offer one.
+    </figcaption>
+  </figure>
+
+  <p>
+    <strong>The asymmetry is the whole story.</strong> Outbound connections carry data in
+    both directions, which is why downloading works perfectly with no forwarded port.
+    What you lose without one is only the ability for peers to <em>initiate</em> — so you
+    upload to fewer of them than you otherwise could.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Option</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Accept it</strong> <span class="tag tag-ok">chosen</span></td>
+          <td>Download speeds unaffected. Upload goes only to peers you connected to.
+              qBittorrent shows a red “not connectable” dot — that is this, not a fault.</td></tr>
+      <tr><td>Forward 6881 on the router</td>
+          <td>Pointless now the VPN is in place: peers know us by the Nord address and
+              never dial the house. Before the VPN it would have worked — and would have
+              advertised the home address to the swarm more loudly.</td></tr>
+      <tr><td>Change provider</td>
+          <td>ProtonVPN and AirVPN forward a port through the tunnel, and Gluetun can ask
+              for one automatically. Worth it only for a ratio-enforcing private tracker.</td></tr>
+      <tr><td>UPnP / NAT-PMP</td>
+          <td>qBittorrent asking the router to open a port by itself. Same dead end as row
+              two, and off for good reasons anyway.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note note-warn">
+    <span class="lbl">Do not combine rows one and two</span>
+    <p>
+      Running the VPN <em>and</em> a router forward, hoping for both, gives the worst
+      outcome: qBittorrent would have to announce the home address to the swarm for the
+      forward to be useful, handing out exactly the address the whole exercise exists to
+      hide.
+    </p>
+  </div>
+</section>
+
+<section id="reach">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Who can reach what</h2></div>
+  <p>
+    The design in one table. Every row was verified by connecting from both sides;
+    <code>bin/homie-check</code> re-tests them on every run.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr><th></th><th>You, anywhere</th><th>Roommates / TV</th><th>The public internet</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>SSH</strong></td><td>the whole machine</td><td>on the LAN only</td><td>no</td></tr>
+      <tr><td><strong>Jellyfin</strong></td><td>over HTTPS</td><td>plain HTTP, in the house</td><td>no</td></tr>
+      <tr><td><strong>Syncthing admin</strong></td><td>over HTTPS</td><td>no</td><td>no</td></tr>
+      <tr><td><strong>Syncthing sync</strong></td><td>yes</td><td>port open, but every peer must be approved by ID</td><td>no</td></tr>
+      <tr><td><strong>Downloader panel</strong></td><td>over HTTPS</td><td>no</td><td>no</td></tr>
+      <tr><td><strong>n8n editor</strong></td><td>over HTTPS</td><td>no</td><td>no</td></tr>
+      <tr><td><strong>ollama</strong></td><td>no — n8n only, inside Docker</td><td>no</td><td>no</td></tr>
+      <tr><td><strong>These docs</strong></td><td>via SSH tunnel to localhost</td><td>no</td><td>no</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    <strong>The right-hand column is entirely no, and that is the headline.</strong> The
+    router forwards no ports at all. Remote access works because your devices and homie
+    both reach outward and meet in the middle — never because anything was opened for the
+    world to knock on.
+  </p>
+
+  <h3>Every network this machine is on</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Network</th><th>Range</th><th>homie is</th><th>Who else is on it</th></tr></thead>
+    <tbody>
+      <tr><td>House WiFi (LAN)</td><td><code>192.168.1.0/24</code></td><td><code>192.168.1.10</code></td>
+          <td>Everyone in the house, plus the router at <code>.1</code>. Jellyfin is the
+              only admin-free thing listening here</td></tr>
+      <tr><td>Tailscale (tailnet)</td><td><code>100.64.0.0/10</code></td><td><code>100.64.0.10</code></td>
+          <td>Only approved devices — currently homie and the MacBook. Every admin page
+              is here and nowhere else</td></tr>
+      <tr><td>Docker bridge<br><code>homeserver_default</code></td><td><code>172.18.0.0/16</code></td><td><code>172.18.0.1</code></td>
+          <td>The containers, and nothing outside the machine. Their individual addresses
+              are assigned in start order and <em>are not stable</em> — read them with
+              <code>docker network inspect</code>, never from a document</td></tr>
+      <tr><td>The VPN tunnel</td><td><code>10.5.0.0/24</code></td><td><code>10.5.0.2</code> inside gluetun</td>
+          <td>Just gluetun and the NordVPN server. qBittorrent sees this and nothing
+              else</td></tr>
+      <tr><td>Docker’s default bridge</td><td><code>172.17.0.0/16</code></td><td><code>172.17.0.1</code></td>
+          <td>Nobody. It exists because Docker always makes one; no service here uses
+              it</td></tr>
+      <tr><td>The public internet</td><td>—</td><td>via the router</td>
+          <td>Everything outbound. The house has one public address; torrent traffic does
+              not use it</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note note-info">
+    <span class="lbl">Read as a rule</span>
+    <p>
+      Which network something is on decides who can reach it. That is the whole security
+      design — not passwords, and not a firewall.
+    </p>
+  </div>
+
+  <h3>One line each</h3>
+  <div class="tablewrap">
+  <table>
+    <tbody>
+      <tr><td><strong>Tailscale</strong></td><td>makes the machine reachable, privately, from anywhere</td></tr>
+      <tr><td><strong>Caddy</strong></td><td>terminates HTTPS and routes browser traffic to services</td></tr>
+      <tr><td><strong>Docker</strong></td><td>isolates each service and forwards chosen ports to it</td></tr>
+      <tr><td><strong>Syncthing</strong></td><td>keeps one folder identical across my own devices</td></tr>
+      <tr><td><strong>Jellyfin</strong></td><td>serves media, converting formats when a device needs it</td></tr>
+      <tr><td><strong>Gluetun</strong></td><td>holds the VPN tunnel and owns the namespace qBittorrent lives in</td></tr>
+      <tr><td><strong>qBittorrent</strong></td><td>downloads, then renames and files what it downloads</td></tr>
+      <tr><td><strong>n8n</strong></td><td>runs the scheduled automations and owns their credentials</td></tr>
+      <tr><td><strong>ollama</strong></td><td>answers n8n’s language-model calls locally, on CPU</td></tr>
+      <tr><td><strong>SSH</strong></td><td>gives the shell and the raw files, bypassing all of the above</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  <span>homie · companion to <a href="architecture.html">Architecture</a></span>
+  <span>Traces verified against the running system 20 Sep 2026</span>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# addmedia — file a video into the Jellyfin library with the naming Jellyfin expects.
+#
+# Jellyfin identifies content almost entirely from the file path. Get the name wrong
+# and you get "Unknown" with no poster; get it right and metadata just appears.
+#
+#   addmedia movie <file> "<Title>" <Year>
+#   addmedia show  <file> "<Title>" <Year> <Season> <Episode> ["<Episode Title>"]
+#
+# Examples:
+#   addmedia movie ~/inbox/notld.mp4 "Night of the Living Dead" 1968
+#   addmedia show  ~/inbox/ep1.mp4 "Dragnet" 1951 2 1 "The Big Jump"
+
+set -euo pipefail
+
+# Media lives on the T7 external SSD. Folder names are the drive's own (Movies/TV),
+# not the old internal-disk layout (movies/shows) — match what is actually there.
+MEDIA_ROOT="${MEDIA_ROOT:-/mnt/t7}"
+MOVIE_DIR="${MOVIE_DIR:-$MEDIA_ROOT/Movies}"
+SHOW_DIR="${SHOW_DIR:-$MEDIA_ROOT/TV}"
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+
+# Refuse to file anything if the T7 is not mounted. Without this check, an unplugged
+# drive means /mnt/t7 is just an empty directory on the root filesystem, and this
+# script would happily mkdir into it and report success while putting the file
+# somewhere Jellyfin cannot see and the next mount will hide entirely.
+mountpoint -q "$MEDIA_ROOT" || die "$MEDIA_ROOT is not mounted — is the T7 plugged in?"
+
+[ $# -ge 4 ] || die "not enough arguments. Run with no args for usage."
+
+kind=$1; src=$2; title=$3; year=$4
+[ -f "$src" ] || die "no such file: $src"
+[[ "$year" =~ ^[0-9]{4}$ ]] || die "year must be 4 digits, got: $year"
+
+ext="${src##*.}"
+# Strip characters that are illegal or awkward in filenames; keep the title readable.
+safe_title=$(printf '%s' "$title" | tr -d '/\\:*?"<>|')
+
+case "$kind" in
+  movie)
+    dir="$MOVIE_DIR/$safe_title ($year)"
+    dest="$dir/$safe_title ($year).$ext"
+    ;;
+  show)
+    [ $# -ge 6 ] || die "show needs: <file> \"<Title>\" <Year> <Season> <Episode> [\"<Ep Title>\"]"
+    season=$5; episode=$6; ep_title=${7:-}
+    printf -v s2 '%02d' "$season"
+    printf -v e2 '%02d' "$episode"
+    dir="$SHOW_DIR/$safe_title ($year)/Season $s2"
+    base="$safe_title ($year) - S${s2}E${e2}"
+    [ -n "$ep_title" ] && base="$base - $(printf '%s' "$ep_title" | tr -d '/\\:*?"<>|')"
+    dest="$dir/$base.$ext"
+    ;;
+  *) die "first argument must be 'movie' or 'show', got: $kind" ;;
+esac
+
+[ -e "$dest" ] && die "destination already exists: $dest"
+
+mkdir -p "$dir"
+mv -n -- "$src" "$dest"
+chmod 644 "$dest"
+printf 'filed -> %s\n' "$dest"
+
+# Nudge Jellyfin to scan. Real-time monitoring usually catches it, but this makes it
+# immediate. Needs JELLYFIN_API_KEY (Dashboard -> API Keys) exported or set in ~/homeserver/.env
+if [ -n "${JELLYFIN_API_KEY:-}" ]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: MediaBrowser Token=$JELLYFIN_API_KEY" \
+    "http://127.0.0.1:8096/Library/Refresh") || true
+  if [ "$code" = "204" ]; then echo "library scan triggered"; else echo "scan request returned HTTP $code"; fi
+else
+  echo "(set JELLYFIN_API_KEY to auto-trigger a scan; otherwise Jellyfin picks it up on its own)"
+fi

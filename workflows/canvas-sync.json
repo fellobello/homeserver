@@ -1,0 +1,212 @@
+{
+  "name": "canvas-sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5,17 * * *",
+              "cronExpression": "0 5,17 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule",
+      "name": "05:00 and 17:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CANVAS_ICS_URL }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": false,
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "fetch-feed",
+      "name": "Fetch Canvas feed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the Canvas iCal feed and derive one Google Calendar event body per VEVENT.\n//\n// WHY THE ID IS DERIVED, NOT STORED: Google lets you specify an event id on insert,\n// and its legal charset is base32hex (0-9, a-v). A sha1 hex digest uses only 0-9a-f,\n// a strict subset -- so sha1(\"canvas:\" + UID) is always a legal Google event id.\n// That makes the sync insert-or-patch with NO local state: uniqueness lives in\n// Google, where the events live. A wiped state file cannot create duplicates.\n// See bin/canvas-preview for the full reasoning; this mirrors its semantics exactly.\n\n// sha1 has to work in two runtimes. n8n's Code node gets `require` (allowlisted via\n// NODE_FUNCTION_ALLOW_BUILTIN=crypto,sqlite); bin/wf-preview's driver is an .mjs\n// module where `require` does not exist, but `process.getBuiltinModule` does.\nconst nodeCrypto =\n  (typeof require === 'function') ? require('crypto')\n  : (typeof process !== 'undefined' && process.getBuiltinModule)\n    ? process.getBuiltinModule('node:crypto')\n    : null;\nif (!nodeCrypto) throw new Error('no crypto module available in this runtime');\n\nconst sha1 = (s) => nodeCrypto.createHash('sha1').update(s).digest('hex');\n\n// ---------------------------------------------------------------- input\n\n// In n8n the upstream HTTP Request node supplies the feed body. bin/wf-preview does\n// NOT execute HTTP nodes -- it passes items through untouched -- so under preview we\n// read the checked-in fixture from $env.__FIXTURES__ instead. This branch can only\n// ever run inside the harness: $env.__PREVIEW__ is set by wf-preview and by nothing\n// else, and `process` is not exposed in n8n's Code-node sandbox.\nlet text = '';\nconst first = $input.first();\nif (first && first.json) {\n  text = first.json.data || first.json.body || first.json.ics || '';\n}\n\nif (!text && $env.__PREVIEW__) {\n  const fs = process.getBuiltinModule('node:fs');\n  const path = ($env.__FIXTURES__ || '/tests/fixtures') + '/canvas-sample.ics';\n  text = fs.readFileSync(path, 'utf8');\n  console.log('preview: read fixture ' + path);\n}\n\nif (!text) throw new Error('no ICS body on the input item (expected $json.data)');\n\n// ---------------------------------------------------------------- parse\n\n// RFC 5545 folds long lines at 75 octets with a leading space or tab. Unfolding\n// first is not optional -- SUMMARY is exactly the field that gets folded, and\n// parsing without this silently truncates assignment titles.\nconst unfolded = text.replace(/\\r?\\n[ \\t]/g, '');\n\nconst events = [];\nlet cur = null;\nfor (const raw of unfolded.split(/\\r?\\n/)) {\n  if (raw === 'BEGIN:VEVENT') { cur = {}; continue; }\n  if (raw === 'END:VEVENT') { if (cur) events.push(cur); cur = null; continue; }\n  if (cur === null) continue;\n  const c = raw.indexOf(':');\n  if (c < 0) continue;\n  const name = raw.slice(0, c);\n  const value = raw.slice(c + 1)\n    .replace(/\\\\n/g, '\\n').replace(/\\\\,/g, ',')\n    .replace(/\\;/g, ';').replace(/\\\\\\\\/g, '\\\\');\n  const semi = name.indexOf(';');\n  const key = (semi < 0 ? name : name.slice(0, semi)).toUpperCase();\n  const params = semi < 0 ? '' : name.slice(semi + 1);\n  if (key === 'DTSTART' || key === 'DTEND') {\n    cur[key] = value;\n    cur[key + '_PARAMS'] = params;\n  } else if (!(key in cur)) {\n    cur[key] = value;\n  }\n}\n\n// THE LOAD-BEARING GUARD, and the one genuinely dangerous bug in this project.\n// If the feed parses to zero events, a downstream delete pass would read that as\n// \"every assignment was deleted\" and wipe the calendar. Throwing here fails the\n// execution loudly instead, which is what the watchdog is for.\nif (events.length === 0) {\n  throw new Error(\n    'ABORT: feed parsed to ZERO events. Refusing to treat that as \"every ' +\n    'assignment was deleted\". Check CANVAS_ICS_URL -- a 404 usually means ' +\n    'Canvas rotated the feed URL.');\n}\n\n// ---------------------------------------------------------------- time\n\n// Canvas emits UTC (trailing Z) for timed events and VALUE=DATE for all-day ones.\n// Pushing the instant untouched and letting Google render it in the target\n// calendar's timezone is what defuses the Arizona trap: homie is Pacific, ASU is\n// Arizona and skips DST, and they diverge on 1 Nov 2026.\nfunction toGoogleTime(value, params) {\n  if (!value) return null;\n  if (/VALUE=DATE/.test(params) || /^\\d{8}$/.test(value)) {\n    return { date: value.replace(/^(\\d{4})(\\d{2})(\\d{2})$/, '$1-$2-$3'), _kind: 'all-day' };\n  }\n  const utc = value.match(/^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})Z$/);\n  if (utc) {\n    return {\n      dateTime: `${utc[1]}-${utc[2]}-${utc[3]}T${utc[4]}:${utc[5]}:${utc[6]}Z`,\n      _kind: 'utc',\n    };\n  }\n  // Not plain UTC. Carry the TZID through explicitly rather than guessing -- Google\n  // resolves the wall-clock time in that zone, which stays correct after 1 Nov.\n  const local = value.match(/^(\\d{4})(\\d{2})(\\d{2})T(\\d{2})(\\d{2})(\\d{2})$/);\n  const tzid = (params.match(/TZID=([^;:]+)/) || [])[1] || null;\n  if (local) {\n    return {\n      dateTime: `${local[1]}-${local[2]}-${local[3]}T${local[4]}:${local[5]}:${local[6]}`,\n      timeZone: tzid || $env.TZ || 'America/Los_Angeles',\n      _kind: tzid ? 'tzid:' + tzid : 'floating',\n    };\n  }\n  return { dateTime: value, _kind: 'unparsed' };\n}\n\nfunction addOneDay(yyyymmdd) {\n  const d = new Date(Date.UTC(+yyyymmdd.slice(0, 4), +yyyymmdd.slice(4, 6) - 1,\n                              +yyyymmdd.slice(6, 8)));\n  d.setUTCDate(d.getUTCDate() + 1);\n  return d.toISOString().slice(0, 10);\n}\n\n// ---------------------------------------------------------------- build\n\nconst out = [];\nlet nonUtc = 0;\nfor (const e of events) {\n  const uid = e.UID || '';\n  if (!uid) { console.warn('VEVENT with no UID, skipped'); continue; }\n\n  const start = toGoogleTime(e.DTSTART, e.DTSTART_PARAMS || '');\n  let end = toGoogleTime(e.DTEND, e.DTEND_PARAMS || '');\n\n  // Google requires an end. Canvas omits DTEND on point-in-time due dates.\n  if (!end && start) {\n    end = start.date\n      ? { date: addOneDay(start.date.replace(/-/g, '')), _kind: 'all-day' }\n      : Object.assign({}, start);\n  }\n  if (start && start._kind !== 'utc' && start._kind !== 'all-day') nonUtc++;\n\n  const kind = start ? start._kind : 'none';\n  if (start) delete start._kind;\n  if (end) delete end._kind;\n\n  const summary = e.SUMMARY || '(no title)';\n  const url = e.URL || '';\n\n  out.push({\n    json: {\n      gcalEventId: sha1('canvas:' + uid),\n      uid,\n      startKind: kind,\n      // The exact request body for POST .../events -- nothing downstream reshapes it.\n      event: {\n        id: sha1('canvas:' + uid),\n        summary,\n        description: url ? `Canvas: ${url}` : 'Synced from Canvas',\n        source: url ? { title: 'Canvas', url } : undefined,\n        start,\n        end,\n        // Every event this workflow creates is branded, so a delete pass can never\n        // touch an event that was added to the calendar by hand.\n        extendedProperties: { private: { source: 'canvas-sync', canvasUid: uid } },\n      },\n    },\n  });\n}\n\nconsole.log(`parsed ${events.length} VEVENT(s) -> ${out.length} event(s)`);\nconsole.log(`ids unique: ${new Set(out.map(o => o.json.gcalEventId)).size}/${out.length}`);\nconsole.log(nonUtc\n  ? `${nonUtc} timestamp(s) NOT plain UTC -- carried with an explicit timeZone`\n  : 'all timestamps plain UTC or all-day (no DST trap)');\n\nreturn out;\n"
+      },
+      "id": "parse-canvas-feed",
+      "name": "Parse Canvas feed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/{{ $env.GCAL_CANVAS_ID }}/events",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "insert-event",
+      "name": "Insert event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split the insert results into \"done\" and \"needs PATCH\".\n//\n// The insert node runs with Ignore Response Code + full response, so a 409 arrives\n// as a normal item rather than failing the execution. 409 is the EXPECTED path for\n// every event after the first run -- it means the derived id already exists, which\n// is the dedup design working, not an error.\n\nconst results = $input.all();\n\n// In n8n, $() reaches a named upstream node so the original event body can be\n// rejoined to its response by index (n8n preserves item order 1:1). bin/wf-preview's\n// shim does not provide $(), and it passes items straight through HTTP nodes, so\n// there $input.all() already IS the parsed events.\nconst source = (typeof $ === 'function')\n  ? $('Parse Canvas feed').all()\n  : results;\n\nconst statusOf = (it) => (it && it.json && (it.json.statusCode ?? it.json.status)) || null;\nconst sawStatus = results.some((r) => statusOf(r) !== null);\n\nconst toPatch = [];\nlet inserted = 0, failed = 0;\n\nfor (let i = 0; i < results.length; i++) {\n  const code = statusOf(results[i]);\n  const orig = (source[i] && source[i].json) || {};\n\n  if (!sawStatus) {\n    // PREVIEW: the insert never ran, so no status exists. Emit every event as a\n    // PATCH candidate purely so the outbound body is visible for review. A real\n    // run only ever patches the ones Google actually rejected with 409.\n    toPatch.push({ json: Object.assign({ _previewAssumed: true }, orig) });\n    continue;\n  }\n  if (code === 409) { toPatch.push({ json: orig }); continue; }\n  if (code >= 200 && code < 300) { inserted++; continue; }\n  failed++;\n  console.error(`insert failed for ${orig.uid || '?'} -> HTTP ${code}`);\n}\n\nif (!sawStatus) {\n  console.log('preview: insert node did not run, so every event is shown as a ' +\n              'PATCH candidate to make the outbound body readable');\n} else {\n  console.log(`inserted ${inserted}, conflicts to patch ${toPatch.length}, failed ${failed}`);\n}\n\nif (failed > 0 && inserted === 0 && toPatch.length === 0) {\n  throw new Error(`every insert failed (${failed}) -- check the Google credential`);\n}\n\nreturn toPatch;\n"
+      },
+      "id": "sort-insert-results",
+      "name": "Sort insert results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/{{ $env.GCAL_CANVAS_ID }}/events/{{ $json.gcalEventId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleCalendarOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "patch-event",
+      "name": "Patch existing event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Record the run in automation.db. bin/homie-automation-check reads this table\n// directly -- never n8n's API -- and alerts when a workflow goes stale, so this\n// node is what makes the dead man's switch work for canvas-sync.\n\nconst items = $input.all();\nconst note = `patched ${items.length}`;\n\n// bin/wf-preview must never write to the real state DB: a dry run that mutates\n// state is not a dry run. This is also the only branch that touches `require`,\n// which the harness's .mjs driver does not have.\nif ($env.__PREVIEW__) {\n  console.log(`preview: would INSERT run_log(canvas-sync, ok, ${items.length}, \"${note}\")`);\n  return items;\n}\n\nconst { DatabaseSync } = require('node:sqlite');\nconst db = new DatabaseSync('/state/automation.db');\ntry {\n  const now = new Date().toISOString();\n  db.prepare(\n    'INSERT INTO run_log (workflow, started_at, finished_at, status, items, note) ' +\n    'VALUES (?, ?, ?, ?, ?, ?)'\n  ).run('canvas-sync', now, now, 'ok', items.length, note);\n} finally {\n  db.close();\n}\n\nreturn items;\n"
+      },
+      "id": "record-run",
+      "name": "Record run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "05:00 and 17:00": {
+      "main": [
+        [
+          {
+            "node": "Fetch Canvas feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Canvas feed": {
+      "main": [
+        [
+          {
+            "node": "Parse Canvas feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Canvas feed": {
+      "main": [
+        [
+          {
+            "node": "Insert event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert event": {
+      "main": [
+        [
+          {
+            "node": "Sort insert results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sort insert results": {
+      "main": [
+        [
+          {
+            "node": "Patch existing event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch existing event": {
+      "main": [
+        [
+          {
+            "node": "Record run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Los_Angeles",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "active": false
+}

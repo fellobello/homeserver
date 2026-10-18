@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# homie-backup — copy the irreplaceable things onto the T7.
+#
+# WHAT IS BACKED UP, AND WHY
+#   ~/data/school-work    rsync mirror. School and work files. Irreplaceable —
+#                         this is the whole point of the exercise.
+#   ~/homeserver          timestamped tar.gz. Matters because .env and config/
+#                         are gitignored, so they exist ONLY on this machine.
+#                         config/syncthing/key.pem is this node's cryptographic
+#                         identity: lose it and every paired device must be
+#                         re-approved by hand.
+#
+# WHAT IS DELIBERATELY NOT BACKED UP
+#   media (343 GB)        Re-acquirable, and it would not fit alongside itself.
+#   jellyfin metadata     231 MB of artwork re-fetched on any rescan. Set
+#                         INCLUDE_METADATA=1 to keep it anyway.
+#   jellyfin cache/log    Regenerated at runtime.
+#   ollama models (1.8G)  Re-downloadable with one `ollama pull`. Backing them up
+#                         turned a 5 MB archive into 1.8 GB on 2026-09-20.
+#
+# THE LIMITATION, STATED PLAINLY
+#   The destination is the SAME PHYSICAL DRIVE as the media. This protects
+#   against deleting a file by accident, which is the likely failure. It does
+#   NOTHING if the T7 itself dies, because both copies die together. A real
+#   off-drive copy of school-work is still an open gap — do not mistake this
+#   for one.
+
+set -euo pipefail
+
+SRC_SYNC="$HOME/data/school-work"
+SRC_REPO="$HOME/homeserver"
+DEST="/mnt/t7/backups"
+KEEP="${KEEP:-7}"          # how many config archives to retain
+stamp=$(date +%Y%m%d-%H%M)
+
+die() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+say() { printf '\033[32m==>\033[0m %s\n' "$1"; }
+
+# Same trap the media binds defend against: if the T7 is unplugged, /mnt/t7 is
+# an empty directory on the root filesystem. Writing there would silently fill
+# the 100 GB root and vanish the moment the drive is remounted.
+mountpoint -q /mnt/t7 || die "/mnt/t7 is not mounted — is the T7 plugged in?"
+command -v rsync >/dev/null || die "rsync not installed: sudo apt install rsync"
+
+mkdir -p "$DEST/school-work" "$DEST/configs"
+
+# ---------------------------------------------------------------- school-work
+# exFAT stores no Unix ownership or permissions, so rsync must be told not to
+# try — otherwise it reports a failure on every single file.
+#   --modify-window=1  exFAT timestamps have 2-second granularity. Without this
+#                      rsync sees every file as changed and recopies the entire
+#                      tree on every run.
+#   --delete           mirror, not accumulate. Note this means a file deleted in
+#                      school-work is also removed here on the next run; the
+#                      protection against accidental deletion is Syncthing's
+#                      365-day .stversions, not this.
+say "school-work -> $DEST/school-work"
+rsync -rtv --delete --modify-window=1 \
+      --no-perms --no-owner --no-group \
+      --exclude='.stversions' --exclude='.stfolder' \
+      "$SRC_SYNC/" "$DEST/school-work/" | tail -3
+
+# --------------------------------------------------------------- config repo
+# Jellyfin is running, so jellyfin.db is being written to and has a live WAL.
+# Copying those files as-is can capture a torn, half-written database. SQLite's
+# online backup API produces a consistent snapshot from a live database with no
+# downtime, so the containers keep running throughout.
+#
+# THREE live databases now, not one (n8n arrived 2026-09-19, Step 13):
+#   jellyfin.db      the media library
+#   database.sqlite  n8n's own store — WORKFLOWS AND ENCRYPTED CREDENTIALS. This is
+#                    the most important file in the archive. A torn copy of it means
+#                    the Google OAuth tokens are gone.
+#   automation.db    dedup cursors, run_log, subscription history.
+# All three are WAL-mode and written while this runs, so all three go through the
+# online-backup API instead of being tarred in place. The live files (and their
+# -wal / -shm siblings) are excluded below so the archive holds only the snapshots.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+mkdir -p "$stage/db-snapshots"
+
+snap_db() { # snap_db <source.db> <name-in-archive>
+  [ -f "$1" ] || return 0
+  say "snapshotting live $(basename "$1") (SQLite online backup)"
+  python3 - "$1" "$stage/db-snapshots/$2" <<'PY'
+import sqlite3, sys
+src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+dst = sqlite3.connect(sys.argv[2])
+with dst:
+    src.backup(dst)
+dst.close(); src.close()
+PY
+}
+
+snap_db "$SRC_REPO/config/jellyfin/config/data/jellyfin.db" jellyfin.db
+snap_db "$SRC_REPO/config/n8n/database.sqlite"              n8n-database.sqlite
+snap_db "$SRC_REPO/config/n8n/state/automation.db"          automation.db
+
+excludes=(
+  --exclude='.git'
+  --exclude='backups'
+  --exclude='config/jellyfin/cache'
+  --exclude='config/jellyfin/config/log'
+  --exclude='config/jellyfin/config/data/jellyfin.db'
+  --exclude='config/jellyfin/config/data/jellyfin.db-wal'
+  --exclude='config/jellyfin/config/data/jellyfin.db-shm'
+  --exclude='config/jellyfin/config/data/SQLiteBackups'
+  # Caddy runs as root, so the runtime state it creates is root-owned and
+  # unreadable to admin. Excluded rather than requiring sudo, which would
+  # block ever automating this. Safe to skip: certs come from Tailscale over
+  # the tailscaled socket, not ACME, so Caddy re-fetches them on its own. The
+  # Caddyfile itself lives in caddy/ in the repo and IS in the archive.
+  --exclude='config/caddy/data'
+  --exclude='config/caddy/config'
+  # Added 2026-09-20 after the first AUTOMATED run produced a 1.8 GB archive where
+  # every previous one was ~5 MB. The entire difference was config/ollama/blobs — a
+  # model file, which is RE-DOWNLOADABLE and so is exactly what the header above says
+  # not to back up, the same category as the media. Restoring it is one command:
+  #     docker exec ollama ollama pull "$LLM_MODEL"   # LLM_MODEL is in .env, which IS archived
+  --exclude='config/ollama'
+  # Live databases — consistent snapshots of these go in separately (snap_db above).
+  # Tarring them in place risks a torn copy, and for n8n that means losing the
+  # encrypted credentials rather than merely losing a cache.
+  --exclude='config/n8n/database.sqlite'
+  --exclude='config/n8n/database.sqlite-wal'
+  --exclude='config/n8n/database.sqlite-shm'
+  --exclude='config/n8n/state/automation.db'
+  --exclude='config/n8n/state/automation.db-wal'
+  --exclude='config/n8n/state/automation.db-shm'
+)
+[ -n "${INCLUDE_METADATA:-}" ] || excludes+=( --exclude='config/jellyfin/config/metadata' )
+
+archive="$DEST/configs/homeserver-$stamp.tar.gz"
+say "homeserver config -> $archive"
+# Build under a .part name and rename only after tar succeeds. A partial archive
+# left behind by a failed run is worse than no archive at all: it looks valid.
+trap 'rm -rf "$stage"; rm -f "$archive.part"' EXIT
+tar czf "$archive.part" "${excludes[@]}" -C "$HOME" homeserver -C "$stage" db-snapshots
+mv "$archive.part" "$archive"
+
+# ------------------------------------------------------------------ retention
+# Keep the most recent $KEEP archives. Timestamped names sort chronologically.
+cd "$DEST/configs"
+ls -1 homeserver-*.tar.gz 2>/dev/null | sort -r | tail -n +$((KEEP+1)) | while read -r old; do
+  say "pruning old archive: $old"
+  rm -f -- "$old"
+done
+
+# -------------------------------------------------------------------- verify
+# A backup that has never been read is a guess. Confirm the archive is valid
+# gzip and that the two files that matter most are actually inside it.
+say "verifying archive"
+gzip -t "$archive" || { rm -f "$archive"; die "archive failed gzip integrity check"; }
+# List once into a variable rather than piping tar into grep -q. grep -q exits on
+# the first match, tar takes SIGPIPE, and `set -o pipefail` then reports the whole
+# pipeline as failed — a passing check that looks like a failure. The here-string
+# has no upstream process, so it cannot happen. -F because '.env' contains a regex
+# metacharacter.
+listing=$(tar tzf "$archive")
+# db-snapshots/ (renamed from jellyfin-db-snapshot/ on 2026-09-20 when n8n's and the
+# automation DB joined it). n8n-database.sqlite is listed because it holds the encrypted
+# credentials — an archive without it is not a restore, it is a re-setup.
+for want in homeserver/.env homeserver/docker-compose.yml \
+            db-snapshots/jellyfin.db db-snapshots/n8n-database.sqlite db-snapshots/automation.db; do
+  grep -qxF "$want" <<<"$listing" || { rm -f "$archive"; die "archive is missing $want"; }
+done
+
+printf '\n\033[32m✓\033[0m backup complete\n'
+printf '    archive:     %s (%s)\n' "$(basename "$archive")" "$(du -h "$archive" | cut -f1)"
+printf '    school-work: %s\n' "$(du -sh "$DEST/school-work" | cut -f1)"
+printf '    retained:    %s config archives\n' "$(ls -1 "$DEST"/configs/homeserver-*.tar.gz 2>/dev/null | wc -l)"
+printf '    T7 free:     %s\n' "$(df -h /mnt/t7 | awk 'NR==2{print $4}')"

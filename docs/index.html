@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>homie — documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="homie.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="nav">
+  <a class="nav-home" href="index.html" aria-current="page">homie docs</a>
+  <a href="operating-manual.html">Operating manual</a>
+  <a href="architecture.html">Architecture</a>
+  <a href="networking.html">Networking</a>
+  <a href="wiring-diagram.html">Wiring diagram</a>
+</nav>
+
+<header class="masthead">
+  <div class="eyebrow">Documentation index</div>
+  <h1>homie</h1>
+  <p class="standfirst">
+    A home server built from one laptop and seven containers, reachable through two
+    deliberately different doors. Four pages describe it; each answers a different
+    question. Start with whichever question you have.
+  </p>
+  <div class="facts">
+    <div><div class="lbl">Machine</div><div class="val">ThinkPad T470</div></div>
+    <div><div class="lbl">System</div><div class="val">Ubuntu Server 26.04</div></div>
+    <div><div class="lbl">House address</div><div class="val mono">192.168.1.10</div></div>
+    <div><div class="lbl">Tailnet address</div><div class="val mono">100.64.0.10</div></div>
+    <div><div class="lbl">Containers</div><div class="val">7</div></div>
+    <div><div class="lbl">Router ports open</div><div class="val">0</div></div>
+  </div>
+</header>
+
+<section id="map">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Which page you want</h2></div>
+
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr><th>Page</th><th>Read it when you are asking</th><th>Written for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><a href="operating-manual.html"><strong>Operating manual</strong></a></td>
+        <td>“How do I watch something / sync a file / get in from outside / restart this
+            safely / tell whether it is healthy?”</td>
+        <td>Anyone using the machine</td>
+      </tr>
+      <tr>
+        <td><a href="architecture.html"><strong>Architecture</strong></a></td>
+        <td>“What is on this box, and why was it built this way rather than some other
+            way?” Every non-obvious decision, with the reasoning and the cost.</td>
+        <td>Anyone judging or changing the design</td>
+      </tr>
+      <tr>
+        <td><a href="networking.html"><strong>Networking</strong></a></td>
+        <td>“How does a request actually get from my laptop to a file on that disk?”
+            Concepts first, then two hop-by-hop traces.</td>
+        <td>Anyone who wants the mechanism</td>
+      </tr>
+      <tr>
+        <td><a href="wiring-diagram.html"><strong>Wiring diagram</strong></a></td>
+        <td>“Show me the whole thing at once.” Every component and every connection
+            between them, drawn.</td>
+        <td>Anyone orienting quickly</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note note-info">
+    <span class="lbl">One fact, one home</span>
+    <p>These pages deliberately do not repeat each other. The two-door trust model is
+      argued once, in <a href="architecture.html">Architecture</a>; how a packet travels
+      is traced once, in <a href="networking.html">Networking</a>; the list of what does
+      not work yet lives once, in the
+      <a href="operating-manual.html#gaps">Operating manual</a>. Where a page needs a
+      fact that belongs somewhere else, it links rather than restates.</p>
+  </div>
+</section>
+
+<section id="glance">
+  <div class="sec-head"><span class="sec-num">02</span><h2>The system in one screen</h2></div>
+  <p>
+    Seven containers defined by a single <code>docker-compose.yml</code>. Which network
+    interface a service listens on is what decides who can reach it — that is the whole
+    access-control design, and <a href="architecture.html#doors">Architecture §02</a>
+    explains why it is done that way rather than with a firewall.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr><th>Service</th><th>Job</th><th>Reachable on</th><th>By whom</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Caddy</strong></td><td>Reverse proxy, HTTPS front door</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:443 :8443 :8444 :8445</code></td><td>Me</td></tr>
+      <tr><td><strong>Jellyfin</strong></td><td>Media streaming, one login each</td>
+          <td><span class="tag tag-lan">all</span> <code>:8096</code></td><td>Me + roommates</td></tr>
+      <tr><td><strong>Syncthing</strong></td><td>Keeps School/Work identical across my devices</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:8384</code> admin · <span class="tag tag-lan">all</span> <code>:22000</code> sync</td><td>Me</td></tr>
+      <tr><td><strong>Gluetun</strong></td><td>Holds the VPN tunnel and owns the namespace qBittorrent lives in</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:8080</code>, on qBittorrent’s behalf</td><td>Me</td></tr>
+      <tr><td><strong>qBittorrent</strong></td><td>Downloads, then renames and files what it downloads</td>
+          <td><span class="tag">no network of its own</span></td><td>Me</td></tr>
+      <tr><td><strong>n8n</strong></td><td>Runs the school and work automations</td>
+          <td><span class="tag">no published port</span> — Caddy only</td><td>Me</td></tr>
+      <tr><td><strong>ollama</strong></td><td>Local LLM, CPU only, for those automations</td>
+          <td><span class="tag">no published port</span> — n8n only</td><td>n8n</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="reading">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Reading these three ways</h2></div>
+
+  <h3>In a browser — the full version, with diagrams</h3>
+  <p>
+    Caddy serves this directory on port 8446, bound to <code>127.0.0.1</code> only. The
+    single way in is an SSH tunnel, which means no extra network exposure at all — not to
+    the house, not even to the tailnet:
+  </p>
+<pre><code>ssh -L 8446:localhost:8446 homie-lan
+# then open http://localhost:8446</code></pre>
+
+  <h3>In a terminal over SSH — text, no diagrams</h3>
+  <p>
+    <code>bin/homie-docs</code> renders any page as plain text. It strips the SVG
+    diagrams, so the wiring diagram in particular is worth a browser.
+  </p>
+<pre><code>homie-docs                  # list what is here
+homie-docs manual           # prefix match
+homie-docs --search vpn     # grep every page at once</code></pre>
+
+  <h3>As files</h3>
+  <p>
+    Everything here is committed to the repo. The two <code>.md</code> files are working
+    notes and read fine in any editor; the four <code>.html</code> pages share
+    <code>homie.css</code>, so open them through the server rather than as
+    <code>file://</code> if you want them styled.
+  </p>
+
+  <div class="note">
+    <span class="lbl">Keeping these honest</span>
+    <p>
+      Claims here are checked against the running machine rather than against the plan
+      that produced it — <code>bin/homie-check</code> is the instrument, and it is what
+      these pages were re-verified with. Numbers that drift daily (library size, free
+      space, item counts) are deliberately not quoted anywhere in the set; ask
+      <code>homie-check</code> instead.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <span>homie · <span class="mono">192.168.1.10</span> · <span class="mono">100.64.0.10</span></span>
+  <span>Verified against the running system 20 Sep 2026</span>
+</footer>
+
+</div>
+</body>
+</html>

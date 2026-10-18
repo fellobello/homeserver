@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# homie-automation-check — the dead man's switch for the n8n automations.
+#
+# THE WHOLE POINT: this runs OUTSIDE n8n, on a systemd timer, and reads the state
+# database DIRECTLY rather than asking n8n's API. If it asked n8n, then "n8n is dead"
+# would be reported by a dead n8n, which is no report at all. The alarm must not share
+# a failure domain with the thing it watches.
+#
+# Exit 0 = everything fresh. Exit 1 = something is stale or down (and an email was sent,
+# if SMTP is configured). Safe to run any time; makes no changes.
+#
+# Usage:  bin/homie-automation-check [--quiet] [--no-mail]
+
+set -uo pipefail
+
+REPO="$HOME/homeserver"
+DB="$REPO/config/n8n/state/automation.db"
+ENV_FILE="$REPO/.env"
+
+QUIET=0; NOMAIL=0
+for a in "$@"; do
+  case "$a" in
+    --quiet)   QUIET=1 ;;
+    --no-mail) NOMAIL=1 ;;
+  esac
+done
+
+pass=0; fail=0; problems=()
+ok(){   [ $QUIET -eq 1 ] || printf '  \033[32m✓\033[0m %s\n' "$1"; pass=$((pass+1)); }
+no(){   [ $QUIET -eq 1 ] || printf '  \033[31m✗\033[0m %s\n' "$1"; fail=$((fail+1)); problems+=("$1"); }
+info(){ [ $QUIET -eq 1 ] || printf '    %s\n' "$1"; }
+
+# .env holds the SMTP settings. Sourced, not parsed, because it is already shell syntax.
+# shellcheck disable=SC1090
+[ -r "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+
+[ $QUIET -eq 1 ] || echo
+[ $QUIET -eq 1 ] || echo "AUTOMATION STACK"
+
+# ---------------------------------------------------------------- containers alive
+for c in n8n ollama; do
+  s=$(docker inspect "$c" --format '{{.State.Status}}' 2>/dev/null)
+  if [ "$s" = running ]; then ok "$c: running"; else no "$c: ${s:-not found}"; fi
+done
+
+# n8n answers its own health endpoint (a running container that has wedged is still down)
+code=$(docker exec n8n wget -qO- --server-response http://127.0.0.1:5678/healthz 2>&1 \
+        | grep -o 'HTTP/1.1 [0-9]*' | head -1 | awk '{print $2}')
+[ "$code" = 200 ] && ok "n8n /healthz: 200" || no "n8n /healthz: ${code:-no answer}"
+
+# Reachable through Caddy over the tailnet, which is how OAuth callbacks arrive.
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://homie.tailnet-name.ts.net:8445/")
+[ "$code" = 200 ] && ok "n8n via Caddy (HTTPS): 200" || no "n8n via Caddy: ${code:-unreachable}"
+
+# ---------------------------------------------------------------- memory headroom
+# The reason every container got a mem_limit in Step 13: a runaway must not be able to
+# take Jellyfin with it. Warn before the kernel has to make that decision.
+avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+if [ "$avail" -gt 1024 ]; then ok "memory headroom: ${avail} MB available"
+else no "memory headroom LOW: only ${avail} MB available"; fi
+
+for c in n8n ollama; do
+  id=$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null) || continue
+  base="/sys/fs/cgroup/system.slice/docker-$id.scope"
+  [ -r "$base/memory.max" ] || continue
+  max=$(cat "$base/memory.max"); cur=$(cat "$base/memory.current")
+  [ "$max" = max ] && { no "$c has NO memory limit set"; continue; }
+  pct=$(( cur * 100 / max ))
+  if [ "$pct" -lt 90 ]; then ok "$c memory: $((cur/1048576))/$((max/1048576)) MiB (${pct}%)"
+  else no "$c memory at ${pct}% of its limit — near OOM"; fi
+done
+
+# ---------------------------------------------------------------- freshness
+# Each workflow declares how long it may go without a successful run before it is
+# considered broken. These windows are deliberately ~1.5x the schedule interval, so a
+# single missed run is tolerated and two in a row are not.
+#   canvas-sync   05:00 + 17:00  -> 16h
+#   morning-brief 05:30 daily    -> 30h
+[ $QUIET -eq 1 ] || echo
+[ $QUIET -eq 1 ] || echo "WORKFLOW FRESHNESS  (read from automation.db, not from n8n)"
+
+if [ ! -r "$DB" ]; then
+  no "state DB missing at $DB"
+else
+  while IFS='|' read -r wf status age_h limit_h; do
+    [ -z "$wf" ] && continue
+    case "$status" in
+      never)
+        info "$wf: never run yet (expected until it is built and enabled)" ;;
+      ok)
+        ok "$wf: last success ${age_h}h ago (limit ${limit_h}h)" ;;
+      stale)
+        no "$wf: last success ${age_h}h ago — EXCEEDS ${limit_h}h window" ;;
+      error)
+        no "$wf: last run ERRORED ${age_h}h ago" ;;
+    esac
+  done < <(python3 - "$DB" <<'PY'
+import sqlite3, sys, datetime
+WINDOWS = {                 # hours a workflow may go without a successful run
+    'canvas-sync':   16,
+    'morning-brief': 30,
+}
+db = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)
+now = datetime.datetime.now(datetime.timezone.utc)
+for wf, limit in WINDOWS.items():
+    row = db.execute(
+        "SELECT status, COALESCE(finished_at, started_at) FROM run_log "
+        "WHERE workflow=? ORDER BY id DESC LIMIT 1", (wf,)).fetchone()
+    if not row:
+        print(f'{wf}|never||{limit}'); continue
+    status, ts = row
+    try:
+        t = datetime.datetime.fromisoformat(ts)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        print(f'{wf}|stale|?|{limit}'); continue
+    age = (now - t).total_seconds() / 3600
+    state = 'error' if status == 'error' else ('ok' if age <= limit else 'stale')
+    print(f'{wf}|{state}|{age:.0f}|{limit}')
+PY
+)
+fi
+
+# ---------------------------------------------------------------- report
+[ $QUIET -eq 1 ] || { echo; echo "  $pass passed, $fail failed"; echo; }
+
+[ "$fail" -eq 0 ] && exit 0
+
+# ---------------------------------------------------------------- alert
+# Deliberately email, not the Discord webhook the morning brief uses. If the brief's
+# delivery path is what broke, an alert down the same path is invisible.
+if [ $NOMAIL -eq 0 ] && [ -n "${ALERT_SMTP_USER:-}" ] && [ -n "${ALERT_EMAIL_TO:-}" ]; then
+  body="homie automation check FAILED at $(date -Is)
+
+$(printf '  - %s\n' "${problems[@]}")
+
+Run 'bin/homie-automation-check' on homie for detail, or open
+https://homie.tailnet-name.ts.net:8445/ to inspect executions."
+  python3 - <<PY 2>/dev/null && echo "alert emailed to ${ALERT_EMAIL_TO}" || echo "alert email FAILED to send"
+import smtplib, os, ssl
+from email.message import EmailMessage
+m = EmailMessage()
+m['Subject'] = 'homie: automation check failed ($fail problem(s))'
+m['From'] = os.environ.get('ALERT_SMTP_USER')
+m['To']   = os.environ.get('ALERT_EMAIL_TO')
+m.set_content('''$body''')
+s = smtplib.SMTP(os.environ.get('ALERT_SMTP_HOST','smtp.gmail.com'),
+                 int(os.environ.get('ALERT_SMTP_PORT','587')), timeout=20)
+s.starttls(context=ssl.create_default_context())
+s.login(os.environ['ALERT_SMTP_USER'], os.environ['ALERT_SMTP_PASS'])
+s.send_message(m); s.quit()
+PY
+else
+  [ $QUIET -eq 1 ] || echo "  (no alert sent — SMTP not configured in .env, or --no-mail)"
+fi
+
+exit 1

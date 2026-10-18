@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# qbt-why — find a finished download by keywords and show why qbt-file would (or
+# would not) file it. A dry run: nothing is moved, nothing leaves qBittorrent.
+#
+#   bin/qbt-why big buck bunny       every keyword must appear, any case, any order
+#   bin/qbt-why --as movies sintel   for a download that has no category
+#
+# It searches the torrent-level entries under /mnt/t7/downloads/complete, works out
+# the category from where the entry sits (tv/ or movies/), and then
+# replays qBittorrent's own hook call with QBT_LOG_LEVEL=DEBUG and QBT_FILE_DRYRUN=1.
+# The path found here works unchanged inside the container because the T7 is
+# mounted at /mnt/t7 on both sides.
+#
+# Keywords are matched with grep -iF: -i ignores case, and -F treats each keyword as
+# plain text rather than a regex, so '.', '[' and '(' in a title can't misfire.
+# Punctuation in the file name doesn't matter either: 'big buck bunny' finds
+# 'Big.Buck.Bunny.2008.1080p' because each word is matched on its own.
+
+set -euo pipefail
+
+DL=/mnt/t7/downloads
+cat_override=""
+if [ "${1:-}" = "--as" ]; then cat_override="${2:?--as needs a category, e.g. tv}"; shift 2; fi
+[ $# -ge 1 ] || { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+# Every keyword must match (AND). One grep per keyword, all case-insensitive.
+matches_all() {
+  local name=$1 kw
+  for kw in "${@:2}"; do grep -qiF -- "$kw" <<<"$name" || return 1; done
+}
+
+# Torrent-level entries only: complete/<name> and complete/tv|movies/<name>.
+# Not the files inside them.
+entries() {
+  local root=$1 p
+  shopt -s nullglob
+  for p in "$root"/* "$root"/tv/* "$root"/movies/*; do
+    case "$p" in "$root/tv"|"$root/movies") continue ;; esac
+    printf '%s\n' "$p"
+  done
+}
+
+hits=()
+while IFS= read -r p; do
+  matches_all "$(basename "$p")" "$@" && hits+=("$p")
+done < <(entries "$DL/complete")
+
+if [ ${#hits[@]} -eq 0 ]; then
+  while IFS= read -r p; do
+    if matches_all "$(basename "$p")" "$@"; then
+      echo "still downloading: ${p#"$DL"/}"
+      echo "qbt-file only runs once it finishes — nothing to explain yet."
+      exit 0
+    fi
+  done < <(entries "$DL/incomplete")
+  echo "nothing in downloads matches: $*" >&2
+  echo "(already filed? look in /mnt/t7/TV or Movies — or try fewer keywords)" >&2
+  exit 1
+fi
+
+if [ ${#hits[@]} -gt 1 ]; then
+  echo "${#hits[@]} matches — add a keyword to narrow it down:" >&2
+  for p in "${hits[@]}"; do echo "  ${p#"$DL"/complete/}" >&2; done
+  exit 1
+fi
+
+path=${hits[0]}
+rel=${path#"$DL"/complete/}
+case "$rel" in
+  tv/*)          category=tv ;;
+  movies/*)      category=movies ;;
+  *)             category="" ;;
+esac
+category=${cat_override:-$category}
+if [ -z "$category" ]; then
+  echo "found: $rel" >&2
+  echo "it has no category, so qBittorrent's hook ignored it. Say what it is:" >&2
+  echo "  bin/qbt-why --as tv $*      (or movies)" >&2
+  exit 1
+fi
+
+echo "found: $rel   (category: $category)"
+echo
+exec docker exec -e QBT_LOG_LEVEL=DEBUG -e QBT_FILE_DRYRUN=1 qbittorrent \
+  /hooks/qbt-file "$path" "$category" "$(basename "$path")"

@@ -1,0 +1,295 @@
+/* homie.css — one stylesheet for every page in docs/.
+ *
+ * Served read-only by Caddy at http://localhost:8446 (see the :8446 block in
+ * ../Caddyfile). Edit here and every page changes; there is no per-page CSS.
+ *
+ * Colour is load-bearing and consistent across all pages:
+ *   blue  = tailnet / private / encrypted     amber = LAN / house / plain HTTP
+ *   green = disk, storage, "verified ok"      red   = exposed, missing, a gap
+ */
+
+:root {
+  --ground:#F7F8FA; --surface:#FFFFFF; --surface-2:#EFF2F6;
+  --ink:#16202B; --ink-2:#3C4A58; --muted:#5A6875;
+  --rule:#D8DEE6; --rule-2:#E8ECF1;
+
+  --tailnet:#1F5E8C; --tailnet-bg:#E8F0F7;
+  --lan:#8A5D0F;     --lan-bg:#F8F0DE;
+  --disk:#2E6F4E;    --disk-bg:#E6F1EA;
+  --alert:#A33B33;   --alert-bg:#FAEBE9;
+
+  --sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --disp:"Archivo","IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --measure:72ch;
+}
+
+@media (prefers-color-scheme:dark) {
+  :root:not([data-theme="light"]) {
+    --ground:#0F151B; --surface:#161E26; --surface-2:#1D2831;
+    --ink:#E4E9EE; --ink-2:#BCC7D2; --muted:#8A99A8;
+    --rule:#2A3641; --rule-2:#222D37;
+    --tailnet:#5FA8D8; --tailnet-bg:#152634;
+    --lan:#D9A03C;     --lan-bg:#2A2114;
+    --disk:#5FA87C;    --disk-bg:#14251C;
+    --alert:#D77A70;   --alert-bg:#2B1917;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#0F151B; --surface:#161E26; --surface-2:#1D2831;
+  --ink:#E4E9EE; --ink-2:#BCC7D2; --muted:#8A99A8;
+  --rule:#2A3641; --rule-2:#222D37;
+  --tailnet:#5FA8D8; --tailnet-bg:#152634;
+  --lan:#D9A03C;     --lan-bg:#2A2114;
+  --disk:#5FA87C;    --disk-bg:#14251C;
+  --alert:#D77A70;   --alert-bg:#2B1917;
+}
+
+/* ---- base ------------------------------------------------------------- */
+
+*,*::before,*::after { box-sizing:border-box; }
+
+body {
+  margin:0; background:var(--ground); color:var(--ink);
+  font:400 16px/1.62 var(--sans);
+  -webkit-text-size-adjust:100%;
+}
+
+.wrap { max-width:960px; margin:0 auto; padding:0 20px 72px; }
+
+h1,h2,h3,h4 { font-family:var(--disp); font-weight:700; line-height:1.22; margin:0; }
+h1 { font-size:clamp(28px,5vw,44px); letter-spacing:-.02em; }
+h2 { font-size:clamp(21px,3.2vw,27px); letter-spacing:-.01em; }
+h3 { font-size:17px; letter-spacing:-.005em; }
+h4 { font-size:15px; }
+
+p { margin:0 0 14px; max-width:var(--measure); }
+p:last-child { margin-bottom:0; }
+
+a { color:var(--tailnet); text-decoration-thickness:1px; text-underline-offset:2px; }
+
+code, .mono { font-family:var(--mono); font-size:.88em; }
+:not(pre) > code {
+  background:var(--surface-2); border:1px solid var(--rule-2);
+  border-radius:4px; padding:.08em .34em; overflow-wrap:break-word;
+}
+pre {
+  font-family:var(--mono); font-size:13px; line-height:1.55;
+  background:var(--surface-2); border:1px solid var(--rule-2);
+  border-radius:8px; padding:12px 14px; margin:0 0 14px;
+  overflow-x:auto;
+}
+pre code { background:none; border:0; padding:0; font-size:inherit; }
+
+hr { border:0; border-top:1px solid var(--rule); margin:40px 0; }
+
+kbd {
+  font-family:var(--mono); font-size:.82em; line-height:1;
+  background:var(--surface); border:1px solid var(--rule);
+  border-bottom-width:2px; border-radius:4px; padding:.15em .38em;
+  white-space:nowrap;
+}
+
+ul,ol { margin:0 0 14px; padding-left:22px; max-width:var(--measure); }
+li { margin:0 0 6px; }
+li > ul, li > ol { margin-top:6px; }
+
+/* ---- cross-doc nav ---------------------------------------------------- */
+
+.nav {
+  display:flex; flex-wrap:wrap; gap:2px 0; align-items:center;
+  border-bottom:1px solid var(--rule); background:var(--surface);
+  margin:0 -20px 0; padding:9px 20px;
+  font-size:13px;
+}
+.nav a {
+  color:var(--muted); text-decoration:none; font-weight:500;
+  padding:4px 10px; border-radius:6px; white-space:nowrap;
+}
+.nav a:hover { background:var(--surface-2); color:var(--ink); }
+.nav a[aria-current="page"] { color:var(--ink); background:var(--surface-2); font-weight:600; }
+.nav .nav-home { font-family:var(--disp); font-weight:800; color:var(--ink); letter-spacing:-.01em; }
+
+/* ---- masthead --------------------------------------------------------- */
+
+.masthead { padding:40px 0 26px; border-bottom:2px solid var(--ink); margin-bottom:34px; }
+.eyebrow {
+  font:600 11px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); margin-bottom:14px;
+}
+.standfirst {
+  font-size:18px; line-height:1.55; color:var(--ink-2);
+  max-width:64ch; margin:14px 0 0;
+}
+
+/* Fact strip under the masthead: label + value pairs. */
+.facts { display:flex; flex-wrap:wrap; gap:0 30px; margin-top:22px; }
+.facts div { padding:2px 0; }
+.facts dt, .facts .lbl {
+  font:600 10px/1 var(--mono); letter-spacing:.11em; text-transform:uppercase;
+  color:var(--muted); margin-bottom:4px;
+}
+.facts dd, .facts .val { margin:0; font-size:14px; font-weight:600; }
+
+/* ---- sections --------------------------------------------------------- */
+
+section { margin:0 0 46px; scroll-margin-top:16px; }
+.sec-head { display:flex; align-items:baseline; gap:12px; margin:0 0 6px; }
+.sec-num {
+  font:700 11px/1 var(--mono); letter-spacing:.1em; color:var(--muted);
+  border:1px solid var(--rule); border-radius:4px; padding:4px 6px; flex:none;
+}
+.sec-head + p, .sec-head + .standfirst { margin-top:10px; }
+h3 { margin:26px 0 8px; }
+h4 { margin:20px 0 6px; color:var(--ink-2); }
+
+/* ---- tables ----------------------------------------------------------- */
+
+.tablewrap { overflow-x:auto; margin:0 0 16px; }
+table { border-collapse:collapse; width:100%; font-size:14.5px; }
+th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--rule-2); vertical-align:top; }
+th {
+  font:600 10px/1.3 var(--mono); letter-spacing:.09em; text-transform:uppercase;
+  color:var(--muted); border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+tbody tr:last-child td { border-bottom:0; }
+td code { white-space:nowrap; }
+
+/* ---- callouts --------------------------------------------------------- */
+
+.note {
+  border-left:3px solid var(--muted);
+  background:var(--surface); border-radius:0 8px 8px 0;
+  padding:13px 16px; margin:0 0 16px; font-size:14.5px;
+}
+.note > :last-child { margin-bottom:0; }
+.note .lbl {
+  display:block; font:600 10px/1 var(--mono); letter-spacing:.11em;
+  text-transform:uppercase; margin-bottom:7px; color:var(--muted);
+}
+.note-warn { border-left-color:var(--alert); background:var(--alert-bg); }
+.note-warn .lbl { color:var(--alert); }
+.note-ok   { border-left-color:var(--disk); background:var(--disk-bg); }
+.note-ok .lbl { color:var(--disk); }
+.note-info { border-left-color:var(--tailnet); background:var(--tailnet-bg); }
+.note-info .lbl { color:var(--tailnet); }
+
+/* ---- cards ------------------------------------------------------------ */
+
+.cards { display:grid; gap:14px; margin:0 0 16px; }
+.cards-2 { grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }
+.cards-3 { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
+
+.card {
+  background:var(--surface); border:1px solid var(--rule);
+  border-radius:10px; padding:15px 17px;
+}
+.card > :last-child { margin-bottom:0; }
+.card h3, .card h4 { margin:0 0 7px; }
+.card p { font-size:14.5px; color:var(--ink-2); }
+
+/* A decision card: verdict chip, heading, then the reasoning. */
+.card .verdict {
+  display:inline-block; font:600 10px/1 var(--mono); letter-spacing:.1em;
+  text-transform:uppercase; padding:4px 7px; border-radius:4px;
+  background:var(--surface-2); color:var(--muted); margin-bottom:9px;
+}
+
+/* ---- chips / tags ----------------------------------------------------- */
+
+.tag {
+  display:inline-block; font:600 10.5px/1 var(--mono); letter-spacing:.07em;
+  text-transform:uppercase; padding:4px 7px; border-radius:4px;
+  background:var(--surface-2); color:var(--muted); white-space:nowrap;
+}
+.tag-tailnet { background:var(--tailnet-bg); color:var(--tailnet); }
+.tag-lan     { background:var(--lan-bg);     color:var(--lan); }
+.tag-ok      { background:var(--disk-bg);    color:var(--disk); }
+.tag-gap     { background:var(--alert-bg);   color:var(--alert); }
+
+/* ---- address block ---------------------------------------------------- */
+
+.addr {
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px;
+  background:var(--surface); border:1px solid var(--rule);
+  border-left:3px solid var(--tailnet);
+  border-radius:0 8px 8px 0; padding:11px 15px; margin:0 0 12px;
+}
+.addr .lbl {
+  font:600 10px/1.4 var(--mono); letter-spacing:.1em; text-transform:uppercase;
+  color:var(--muted);
+}
+.addr .val { font-family:var(--mono); font-size:14px; font-weight:500; overflow-wrap:anywhere; }
+.addr-lan { border-left-color:var(--lan); }
+
+/* ---- numbered procedure ----------------------------------------------- */
+
+.steps { list-style:none; counter-reset:s; padding:0; margin:0 0 16px; max-width:var(--measure); }
+.steps > li {
+  counter-increment:s; position:relative; padding:0 0 14px 38px; margin:0;
+  border-left:1px solid var(--rule); margin-left:11px;
+}
+.steps > li:last-child { border-left-color:transparent; padding-bottom:0; }
+.steps > li::before {
+  content:counter(s); position:absolute; left:-11px; top:0;
+  width:22px; height:22px; border-radius:50%;
+  background:var(--surface); border:1px solid var(--rule); color:var(--muted);
+  font:600 11px/20px var(--mono); text-align:center;
+}
+.steps > li > :last-child { margin-bottom:0; }
+.steps strong { font-weight:600; }
+
+/* ---- diagrams --------------------------------------------------------- */
+
+figure { margin:0 0 20px; }
+.diagram {
+  display:block; width:100%; height:auto;
+  background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+}
+.figwrap { overflow-x:auto; }
+figcaption { font-size:13.5px; color:var(--muted); margin-top:9px; max-width:var(--measure); }
+
+/* SVG primitives, shared by every diagram on every page. */
+.d-box    { fill:var(--surface); stroke:var(--rule); stroke-width:1.5; }
+.d-box-t  { fill:var(--tailnet-bg); stroke:var(--tailnet); }
+.d-box-l  { fill:var(--lan-bg);     stroke:var(--lan); }
+.d-box-d  { fill:var(--disk-bg);    stroke:var(--disk); }
+.d-box-a  { fill:var(--alert-bg);   stroke:var(--alert); }
+.d-zone   { fill:none; stroke:var(--rule); stroke-width:1; stroke-dasharray:4 4; }
+.d-line   { fill:none; stroke:var(--muted); stroke-width:1.6; }
+.d-line-t { stroke:var(--tailnet); }
+.d-line-l { stroke:var(--lan); }
+.d-line-d { stroke:var(--disk); }
+.d-line-a { stroke:var(--alert); }
+.d-dash   { stroke-dasharray:5 4; }
+
+.d-name { font:600 13px var(--disp); fill:var(--ink); }
+.d-sub  { font:400 11px var(--mono); fill:var(--muted); }
+.d-edge { font:500 10.5px var(--mono); fill:var(--muted); }
+.d-edge-t { fill:var(--tailnet); }
+.d-edge-l { fill:var(--lan); }
+.d-edge-d { fill:var(--disk); }
+.d-edge-a { fill:var(--alert); }
+.d-zonelbl {
+  font:600 10px var(--mono); fill:var(--muted);
+  letter-spacing:.1em; text-transform:uppercase;
+}
+
+/* ---- footer ----------------------------------------------------------- */
+
+footer {
+  border-top:1px solid var(--rule); margin-top:8px; padding:20px 0 0;
+  font-size:13px; color:var(--muted);
+  display:flex; flex-wrap:wrap; gap:6px 18px; justify-content:space-between;
+}
+
+/* ---- narrow screens --------------------------------------------------- */
+
+@media (max-width:560px) {
+  body { font-size:15.5px; }
+  .wrap { padding:0 16px 56px; }
+  .nav { margin:0 -16px; padding:8px 16px; }
+  .masthead { padding:26px 0 20px; }
+  .facts { gap:0 20px; }
+  .sec-num { padding:3px 5px; }
+}

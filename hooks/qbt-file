@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""qbt-file — file a finished torrent into the Jellyfin library, correctly named.
+
+Runs INSIDE the qbittorrent container, as its "Run on torrent finished" hook:
+
+    /hooks/qbt-file "%F" "%L" "%N" "%I"
+
+  %F = content path (the file, or the folder for a multi-file torrent)
+  %L = category  (tv / movies — anything else is ignored)
+  %N = torrent name
+  %I = info hash v1 — optional, and only used to clean the torrent up afterwards
+
+DESIGN RULES, in priority order:
+
+  1. NEVER GUESS AT A *STRUCTURE*. Season/episode numbers and a film's year are
+     parsed or the release is refused -- those cannot be invented. A TITLE is
+     different: it is derived from the release name and filed, because a slightly
+     ugly folder is visible in Jellyfin and fixable in seconds, whereas a refusal is
+     invisible unless you read this log. series-map.conf overrides the derived title
+     for both shows and films; it gates neither. (Changed 2026-09-21 -- it used to
+     gate TV, which stalled every new show until the file was hand-edited.)
+  2. NEVER OVERWRITE. An existing destination is a skip, not a replace.
+  3. MOVE, DON'T COPY. Downloads and the library are both on the T7 AND inside the one
+     /mnt/t7 bind mount, so a move is an instant rename: no byte copy, no double disk
+     usage. (Both halves matter: rename(2) fails with EXDEV across two bind mounts of
+     the same filesystem, and shutil.move then silently copies.) This is only
+     correct because seeding here is already impossible (no port forwarding, so no
+     inbound peers — the ratio sits at 0.00). Set QBT_FILE_MODE=copy to seed instead,
+     and budget double the space.
+
+exFAT NOTES: /mnt/t7 fixes ownership and mode at mount time (uid/gid 1000, files 644).
+chmod/chown there silently succeed and change nothing, so this script never attempts
+either. It also cannot live on the T7 — chmod +x no-ops there — which is why it lives
+in ~/homeserver/hooks (ext4), a folder bind-mounted read-only.
+
+Preview without touching anything:   QBT_FILE_DRYRUN=1 /hooks/qbt-file "<path>" tv "<name>"
+"""
+import logging, os, re, sys, shutil, unicodedata
+
+SHOWS   = os.environ.get("QBT_SHOWS_DIR",  "/mnt/t7/TV")
+MOVIES  = os.environ.get("QBT_MOVIES_DIR", "/mnt/t7/Movies")
+MAPFILE = os.environ.get("QBT_MAP_FILE",   "/hooks/series-map.conf")
+LOGFILE = os.environ.get("QBT_LOG_FILE",   "/config/qbt-file.log")
+DRYRUN  = os.environ.get("QBT_FILE_DRYRUN", "") not in ("", "0")
+MODE    = os.environ.get("QBT_FILE_MODE", "move").lower()
+
+QB_URL  = os.environ.get("QBT_API_URL",  "http://localhost:8080")
+QB_USER = os.environ.get("QBIT_WEBUI_USER", "")
+QB_PASS = os.environ.get("QBIT_WEBUI_PASS", "")
+
+VIDEO = {".mkv", ".mp4", ".avi", ".m4v", ".mov"}
+SUBS  = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+# Junk that ships alongside releases and must never reach the library.
+# Deliberately NARROW. An earlier version matched two more words and silently rejected
+# a real film, because one of them was part of the release group's name, which appears
+# in the file name of the actual film. A junk filter that eats
+# real media is worse than one that lets a sample through, because the sample gets
+# caught by the size check below and a rejected film just vanishes from the log.
+JUNK  = re.compile(r"(^|[^a-z])(sample|trailer|proof)([^a-z]|$)", re.I)
+
+# LOGGING. Two independent things describe every line:
+#   - the EVENT WORD inside the message (OK, SKIP, DRY, REFUSE, FAIL, note) says WHAT
+#     happened. It is the vocabulary a person reads, and it is unchanged.
+#   - the LEVEL says WHO needs to care, and decides whether the line is written at all.
+#       error    it did not file, and a person has to act (REFUSE, FAIL)
+#       warning  it coped, but something is off (SKIP, WARN, torrent kept)
+#       info     one line per real event: the story of a normal run
+#       debug    the reasoning behind each decision; off unless asked for
+# QBT_LOG_LEVEL=DEBUG turns the reasoning on. Debug calls use logging's lazy
+# '%s' arguments rather than f-strings: at the default level they are dropped, and
+# lazy arguments mean a dropped line is never even formatted.
+class _Fmt(logging.Formatter):
+    """'timestamp  message', as this log has always read. Debug lines get a marker so
+    they stand out from the normal story in a verbose run."""
+    _debug = logging.Formatter("%(asctime)s    debug  %(message)s", "%Y-%m-%d %H:%M:%S")
+    def format(self, record):
+        if record.levelno == logging.DEBUG:
+            return self._debug.format(record)
+        return super().format(record)
+
+log = logging.getLogger("qbt-file")
+_level = logging.getLevelName(os.environ.get("QBT_LOG_LEVEL", "INFO").upper())
+log.setLevel(_level if isinstance(_level, int) else logging.INFO)
+# stdout for manual runs (qBittorrent discards a hook's output); the file is the record
+# of what actually HAPPENED, so a dry run never writes to it. A preview's REFUSE lines
+# in the file read exactly like real failures — that confusion is why this is skipped.
+_handlers = [logging.StreamHandler(sys.stdout)]
+_log_file_error = None
+if not DRYRUN:
+    try:
+        _handlers.append(logging.FileHandler(LOGFILE))
+    except OSError as _e:
+        _log_file_error = _e
+for _h in _handlers:
+    _h.setFormatter(_Fmt("%(asctime)s  %(message)s", "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(_h)
+if _log_file_error:
+    log.warning(f"  WARN  cannot write {LOGFILE}: {_log_file_error} — logging to stdout only")
+
+def norm(s):
+    """Collapse a title to a comparable key: lowercase, alphanumerics only.
+    'Harbor.Town.US' / 'Harbor Town (US)' / 'harbor_town_us' all become 'harbortownus'."""
+    s = unicodedata.normalize("NFKD", s)
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+def load_map():
+    out = {}
+    try:
+        with open(MAPFILE) as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw or raw.startswith("#") or "|" not in raw:
+                    continue
+                left, right = raw.split("|", 1)
+                out[norm(left)] = right.strip()
+    except OSError as e:
+        log.warning(f"WARN  could not read {MAPFILE}: {e}")
+    log.debug("series-map: %d override(s) loaded from %s", len(out), MAPFILE)
+    return out
+
+def videos_under(path):
+    """Every real video file under a torrent's content path, samples excluded."""
+    found = []
+    if os.path.isfile(path):
+        cands = [path]
+    else:
+        cands = [os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs]
+    for f in cands:
+        ext = os.path.splitext(f)[1].lower()
+        if ext not in VIDEO:
+            continue
+        if JUNK.search(os.path.basename(f)):
+            log.info(f"      skipping junk/sample: {os.path.basename(f)}")
+            continue
+        # Guard against a stray 40 MB 'sample.mkv' that dodged the name check.
+        try:
+            if os.path.getsize(f) < 50 * 1024 * 1024:
+                log.info(f"      skipping tiny file ({os.path.getsize(f)//1024//1024} MB): {os.path.basename(f)}")
+                continue
+        except OSError:
+            continue
+        found.append(f)
+    log.debug("%d file(s) under content path, %d kept as video", len(cands), len(found))
+    return sorted(found)
+
+# S01E02 / S01E02E03 / S01E02-E03 / 1x02 — the episode forms actually seen in the wild.
+EP_RE = re.compile(r"[._\s-]?[Ss](\d{1,2})[._\s-]?[Ee](\d{1,3})(?:[._\s-]?[-Ee]{1,2}(\d{1,3}))?")
+ALT_RE = re.compile(r"(?<![a-z0-9])(\d{1,2})x(\d{2})(?![0-9])", re.I)
+
+def parse_episode(name):
+    m = EP_RE.search(name)
+    if m:
+        s, e1, e2 = int(m.group(1)), int(m.group(2)), m.group(3)
+        return s, e1, (int(e2) if e2 else None), name[:m.start()]
+    m = ALT_RE.search(name)
+    if m:
+        return int(m.group(1)), int(m.group(2)), None, name[:m.start()]
+    return None
+
+YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])")
+# Where the release metadata starts. Everything from here on is quality/source/group
+# noise, never part of the title.
+QUALITY_RE = re.compile(
+    r"(?<![a-z0-9])(2160p|1080p|720p|480p|4k|uhd|bluray|blu-ray|brrip|bdrip|web-?dl|"
+    r"webrip|hdtv|dvdrip|remux|x26[45]|h\.?26[45]|hevc|avc|xvid|aac|ac3|dts|ddp?5|"
+    r"proper|repack|extended|imax|hdr|10bit)(?![a-z])", re.I)
+
+def parse_movie(name):
+    """Split 'Space.Station.2049.2017.1080p.BluRay-GRP' into ('Space Station 2049', '2017').
+
+    The naive rule — 'the title is whatever precedes the first year' — is wrong for
+    any film with a year IN its name, such as '2012' or 'Space Station 2049'.
+    So the title region is cut at the first QUALITY marker instead, and within that
+    region the LAST year is taken as the release year. 'Space.Station.2049.2017' then
+    gives title 'Space Station 2049', year 2017, and plain 'Space.Station.1982' still
+    gives 'Space Station', 1982.
+
+    This is a heuristic and it WILL eventually be wrong — it is the job Radarr does
+    properly by asking TMDB. It refuses rather than guessing when no year is present.
+    """
+    stem = os.path.splitext(name)[0]
+    q = QUALITY_RE.search(stem)
+    region = stem[:q.start()] if q else stem
+    years = list(YEAR_RE.finditer(region))
+    # A year at position 0 is the whole title (e.g. the film '2012'), not the release year.
+    years = [m for m in years if m.start() > 0]
+    if not years:
+        return None
+    best = years[-1]
+    title = re.sub(r"[._]+", " ", region[:best.start()]).strip(" -([{.")
+    title = re.sub(r"\s+", " ", title)
+    return (title, best.group(1)) if title else None
+
+def sidecars(video):
+    """Subtitle files sharing the video's stem, preserving any language suffix.
+    'Ep.S01E01.en.srt' beside 'Ep.S01E01.mkv' keeps the '.en'."""
+    stem = os.path.splitext(video)[0]
+    base = os.path.basename(stem)
+    out = []
+    for f in os.listdir(os.path.dirname(video) or "."):
+        full = os.path.join(os.path.dirname(video) or ".", f)
+        if not os.path.isfile(full) or os.path.splitext(f)[1].lower() not in SUBS:
+            continue
+        if f.startswith(base):
+            suffix = f[len(base):]              # e.g. '.en.srt' or '.srt'
+            out.append((full, suffix))
+    return out
+
+def place(src, dest_dir, dest_base):
+    """Move/copy src to dest_dir/dest_base+ext, plus any subtitle sidecars."""
+    ext = os.path.splitext(src)[1].lower()
+    dest = os.path.join(dest_dir, dest_base + ext)
+    moves = [(src, dest)] + [
+        (sub, os.path.join(dest_dir, dest_base + suf)) for sub, suf in sidecars(src)
+    ]
+    for s, d in moves:
+        if os.path.exists(d):
+            log.warning(f"  SKIP  exists already: {d}")
+            return False
+    if DRYRUN:
+        for s, d in moves:
+            log.info(f"  DRY   {os.path.basename(s)}\n          -> {d}")
+        return True
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        log.error(f"  FAIL  cannot create {dest_dir}: {e}")
+        return False
+    for s, d in moves:
+        try:
+            if MODE == "copy":
+                shutil.copy2(s, d)
+            else:
+                # One mount -> instant rename. shutil.move falls back to a real copy
+                # if it ever is not (EXDEV), which is safe but slow; homie-check
+                # asserts the rename path so that fallback cannot go unnoticed again.
+                shutil.move(s, d)
+            log.info(f"  OK    {os.path.basename(d)}")
+        except OSError as e:
+            log.error(f"  FAIL  {os.path.basename(s)}: {e}")
+            return False
+    return True
+
+def series_folder(title_part):
+    """Turn the pre-SxxExx part of a release name into a library folder name.
+
+    The TV counterpart to parse_movie, and deliberately more forgiving than it: a
+    show's year is usually NOT in the release name, so unlike a film this cannot
+    refuse for want of one. 'Night.Shift' -> 'Night Shift'. A year is kept
+    when one IS present: 'Harbor.Town.2022' -> 'Harbor Town (2022)'.
+
+    Case is left exactly as the release wrote it. .title() would turn 'Harbor Town US'
+    into 'Harbor Town Us' -- and getting a name subtly wrong is the thing actually
+    worth avoiding here, which is what series-map.conf is still for.
+    """
+    s = re.sub(r"^\s*[\[(][^\])]*[\])]\s*", "", title_part)   # drop '[GroupTag] ' style tags
+    s = re.sub(r"[._]+", " ", s)
+    q = QUALITY_RE.search(s)
+    if q:
+        s = s[:q.start()]
+    year = None
+    years = [m for m in YEAR_RE.finditer(s) if m.start() > 0]
+    if years:
+        year = years[-1].group(1)
+        s = s[:years[-1].start()]
+    s = re.sub(r"\s+", " ", s).strip(" -([{.")
+    if not s:
+        return None
+    return f"{s} ({year})" if year else s
+
+def do_tv(video, smap):
+    name = os.path.basename(video)
+    parsed = parse_episode(name)
+    if not parsed:
+        # Folder name sometimes carries SxxExx when the file does not.
+        parsed = parse_episode(os.path.basename(os.path.dirname(video)))
+    if not parsed:
+        log.error(f"  REFUSE no season/episode found in: {name}")
+        return False
+    season, ep1, ep2, title_part = parsed
+    key = norm(re.sub(r"[._]+", " ", title_part))
+    if not key:
+        log.error(f"  REFUSE could not read a series title from: {name}")
+        return False
+    folder = smap.get(key)
+    log.debug("parsed %r -> season %d, episode %d%s, map key %r (%s)", name, season, ep1,
+              f"-{ep2}" if ep2 else "", key, "series-map hit" if folder else "no override")
+    if not folder:
+        # Not in the map is NOT an error. The map is an override table, exactly as it
+        # already was for films -- it is consulted first and wins when it has an entry,
+        # but a show absent from it files under its parsed name rather than stalling.
+        # The old behaviour refused here, which meant every new show silently stopped
+        # in /downloads until someone hand-edited a config file and re-ran the hook.
+        # That is a worse failure than a slightly ugly folder name: an ugly name is
+        # visible in Jellyfin and takes seconds to correct, whereas a refusal is
+        # invisible unless you go and read this log.
+        folder = series_folder(title_part)
+        if not folder:
+            log.error(f"  REFUSE could not read a series title from: {name}")
+            return False
+        plain = re.sub(r"[._]+", " ", title_part).strip(" -")
+        log.info(f"  note: '{folder}' not in series-map.conf — filing under the parsed name")
+        log.info(f"        to file it elsewhere, add this to ~/homeserver/hooks/series-map.conf:")
+        log.info(f"           {plain.lower():22} | {folder}")
+    ep = f"S{season:02d}E{ep1:02d}" + (f"-E{ep2:02d}" if ep2 else "")
+    return place(video, os.path.join(SHOWS, folder, f"Season {season:02d}"),
+                 f"{folder} - {ep}")
+
+def do_movie(video, smap):
+    name = os.path.basename(video)
+    parsed = parse_movie(name) or parse_movie(os.path.basename(os.path.dirname(video)))
+    if not parsed:
+        log.error(f"  REFUSE no 'Title Year' found in: {name}")
+        return False
+    title, year = parsed
+    override = smap.get(norm(title))
+    log.debug("parsed %r -> title %r, year %s, override %r", name, title, year, override)
+    folder = override if override else f"{title} ({year})"
+    return place(video, os.path.join(MOVIES, folder), folder)
+
+def remove_torrent(infohash):
+    """Drop the torrent from qBittorrent once its files have been moved away.
+
+    Without this, qBittorrent keeps a completed torrent whose files no longer exist at
+    the recorded path and flags it 'missing files' on the next recheck or restart — a
+    permanent error row for every download. deleteFiles is FALSE: the bytes are in the
+    library now and must not be touched.
+
+    Only reached when every video in the torrent filed successfully, so a partial or
+    refused import leaves the torrent in place for you to look at. Credentials come
+    from the container environment (compose passes them from .env); with none set this
+    is skipped and the torrent is simply left alone.
+    """
+    if not infohash or not QB_USER or not QB_PASS:
+        log.info("  note: no API credentials — torrent left in qBittorrent, remove it manually")
+        return
+    import urllib.request, urllib.parse, http.cookiejar
+    try:
+        cj = http.cookiejar.CookieJar()
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        # Referer must match the Host qBittorrent believes it serves, or it 401s.
+        req = urllib.request.Request(
+            f"{QB_URL}/api/v2/auth/login",
+            data=urllib.parse.urlencode({"username": QB_USER, "password": QB_PASS}).encode(),
+            headers={"Referer": QB_URL})
+        op.open(req, timeout=10)
+        # qBittorrent 5.x answers a successful login with 204 and an EMPTY body — it
+        # does NOT return the "Ok." string older versions did, so the session cookie
+        # is the only reliable success signal. A wrong password gives 200 + a body.
+        if not any(c.name.startswith("QBT_SID") for c in cj):
+            log.warning("  WARN  qBittorrent API login failed — torrent left in place")
+            return
+        log.debug("API login ok at %s; deleting %s with deleteFiles=false", QB_URL, infohash)
+        req = urllib.request.Request(
+            f"{QB_URL}/api/v2/torrents/delete",
+            data=urllib.parse.urlencode({"hashes": infohash, "deleteFiles": "false"}).encode(),
+            headers={"Referer": QB_URL})
+        op.open(req, timeout=10)
+        log.info(f"  cleaned up torrent {infohash[:12]} (files kept — they are in the library)")
+    except Exception as e:
+        log.warning(f"  WARN  could not remove torrent: {e} — left in place")
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    content, category = sys.argv[1], sys.argv[2].strip().lower()
+    tname = sys.argv[3] if len(sys.argv) > 3 else os.path.basename(content)
+    infohash = sys.argv[4] if len(sys.argv) > 4 else ""
+    log.info(f"--- finished: {tname}  [category={category or 'none'}] "
+        f"{'(DRY RUN)' if DRYRUN else ''}")
+    log.debug("content=%r mode=%s shows=%s movies=%s", content, MODE, SHOWS, MOVIES)
+    if category not in ("tv", "movies"):
+        log.info(f"  IGNORE category '{category}' is not tv/movies — leaving it alone")
+        return 0
+    if not os.path.exists(content):
+        log.error(f"  FAIL  content path does not exist: {content}")
+        return 1
+    vids = videos_under(content)
+    if not vids:
+        log.error("  REFUSE no video files found")
+        return 1
+    smap = load_map()
+    handler = do_tv if category == "tv" else do_movie
+    filed, total = sum(1 for v in vids if handler(v, smap)), len(vids)
+    log.info(f"  done: {filed}/{total} filed")
+    if filed == total and filed > 0 and not DRYRUN and MODE != "copy":
+        remove_torrent(infohash)
+    elif filed != total:
+        log.warning("  torrent kept in qBittorrent — something was refused, look above")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

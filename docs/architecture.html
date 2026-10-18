@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>homie — architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="homie.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="nav">
+  <a class="nav-home" href="index.html">homie docs</a>
+  <a href="operating-manual.html">Operating manual</a>
+  <a href="architecture.html" aria-current="page">Architecture</a>
+  <a href="networking.html">Networking</a>
+  <a href="wiring-diagram.html">Wiring diagram</a>
+</nav>
+
+<header class="masthead">
+  <div class="eyebrow">What it is, and why it is built this way</div>
+  <h1>Architecture</h1>
+  <p class="standfirst">
+    One laptop, seven containers, and one idea that decides almost everything else:
+    there are two doors into this box, and not everyone gets both.
+  </p>
+  <div class="facts">
+    <div><div class="lbl">Machine</div><div class="val">ThinkPad T470 · i5-7300U · 7 GiB</div></div>
+    <div><div class="lbl">System</div><div class="val">Ubuntu Server 26.04</div></div>
+    <div><div class="lbl">Containers</div><div class="val">7</div></div>
+    <div><div class="lbl">Router ports open</div><div class="val">0</div></div>
+  </div>
+</header>
+
+<section id="machine">
+  <div class="sec-head"><span class="sec-num">01</span><h2>The machine</h2></div>
+  <p>
+    A ThinkPad T470 with an i5-7300U, 7 GiB of RAM and a 238 GB NVMe drive. It sits on
+    WiFi at a fixed address, has no monitor attached, and nobody ever logs in at a
+    screen. Everything reaches it over the network.
+  </p>
+
+  <div class="cards cards-2">
+    <div class="card">
+      <h3>No GPU, but a video engine</h3>
+      <p>
+        There is no discrete GPU, which is why a large local assistant waits on better
+        hardware. But the Intel HD 620 has a Quick Sync engine that does video encode and
+        decode in dedicated silicon — useless for language models, excellent for
+        streaming. That asymmetry is why Jellyfin was built early and the assistant was
+        not.
+      </p>
+    </div>
+    <div class="card">
+      <h3>7 GiB is the real constraint</h3>
+      <p>
+        Seven containers, one of which loads a language model, on a box with 7 GiB and
+        four threads. Every container therefore carries a memory ceiling, and ollama
+        carries a CPU ceiling too. The point is not efficiency — it is that no single
+        service can starve Jellyfin mid-playback. See
+        <a href="#limits">§05, memory ceilings</a>.
+      </p>
+    </div>
+  </div>
+
+  <p>
+    One early problem solved itself. The Ubuntu installer claimed only 100 GB of a 235 GB
+    partition, leaving ~135 GB stranded in the volume group. Before that became worth
+    fixing, a 931 GB external SSD arrived and the media library moved onto it. The
+    internal disk now holds only the OS and the services, with room to spare, and nobody
+    had to touch a partition table.
+  </p>
+</section>
+
+<section id="doors">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Two doors</h2></div>
+  <p>
+    One requirement drives the configuration of every service: <strong>roommates get
+    media, and nothing else.</strong> No file shares, no admin panels, no shell.
+  </p>
+  <p>
+    That is enforced by <em>which network interface each service listens on</em>. Two
+    people asking for two different things arrive on two different paths, and the box
+    does not answer the wrong question on the wrong door.
+  </p>
+
+  <div class="cards cards-2">
+    <div class="card">
+      <span class="tag tag-tailnet">Private door</span>
+      <h3>Me, from anywhere</h3>
+      <p>
+        A laptop or phone on any network on earth, through an encrypted WireGuard tunnel,
+        arriving on the <code>tailscale0</code> interface at <code>100.64.0.10</code>,
+        where Caddy answers on <code>:443</code>, <code>:8443</code>, <code>:8444</code>
+        and <code>:8445</code> with real HTTPS.
+      </p>
+      <p>
+        Requires membership in my Tailscale network. Nothing here is reachable from the
+        house WiFi, and no port is forwarded on the router.
+      </p>
+    </div>
+    <div class="card">
+      <span class="tag tag-lan">Shared door</span>
+      <h3>Roommates, in the house</h3>
+      <p>
+        A phone or TV on the house WiFi, over plain HTTP, arriving on the
+        <code>wlp4s0</code> interface at <code>192.168.1.10</code>, where Jellyfin
+        answers on <code>:8096</code> — and nothing else does.
+      </p>
+      <p>
+        Syncthing’s admin panel is not merely password-protected from here. It does not
+        accept connections on this interface at all.
+      </p>
+    </div>
+  </div>
+
+  <div class="note note-warn">
+    <span class="lbl">The trap this avoids</span>
+    <p>
+      A firewall looks like the obvious way to enforce this, and it would not have
+      worked. <strong>Docker writes its own iptables rules, evaluated before ufw’s</strong>,
+      so a container that publishes a port is reachable from the whole network while the
+      firewall reports itself active and set to deny everything. Trusting
+      <code>ufw status</code> here produces a server that looks locked down and is not.
+    </p>
+    <p>
+      So each port is pinned to a specific address in <code>docker-compose.yml</code>
+      instead, and every one is verified by connecting from both sides rather than
+      assumed. <code>bin/homie-check</code> re-tests all of them on every run.
+    </p>
+  </div>
+
+  <h3>The four binding patterns</h3>
+  <p>
+    Every <code>ports:</code> entry in the compose file is one of these, and the rule is
+    written at the top of that file so the next service does not have to re-derive it.
+  </p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Pattern</th><th>Written as</th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td>Tailnet only</td><td><code>"${TAILNET_IP}:PORT:PORT"</code></td>
+          <td>Admin UIs — Syncthing, qBittorrent, and Caddy’s own listeners</td></tr>
+      <tr><td>Genuinely LAN</td><td><code>"PORT:PORT"</code></td>
+          <td>Jellyfin on 8096, and Syncthing’s sync protocol on 22000</td></tr>
+      <tr><td>Localhost only</td><td><code>"127.0.0.1:PORT:PORT"</code></td>
+          <td>These docs, on 8446 — reachable solely through an SSH tunnel</td></tr>
+      <tr><td><strong>No port at all</strong></td><td>no <code>ports:</code> block</td>
+          <td><strong>Best.</strong> n8n and ollama. Caddy reaches them by container name
+              on the private Docker network, so there is no host socket to mis-bind.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    The fourth row is the strongest form of the rule and is where new services should
+    land by default. A port that is never published cannot be published to the wrong
+    interface.
+  </p>
+</section>
+
+<section id="services">
+  <div class="sec-head"><span class="sec-num">03</span><h2>The seven services</h2></div>
+  <p>
+    Each is a block in a single <code>docker-compose.yml</code>. They address each other
+    by name on a private Docker network; only the ports below are published outward.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Service</th><th>Job</th><th>Published on</th><th>Who reaches it</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Caddy</strong></td>
+          <td>Reverse proxy and HTTPS front door</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:443 :8443 :8444 :8445</code><br>
+              <span class="tag">local</span> <code>:8446</code></td>
+          <td>Me only</td></tr>
+      <tr><td><strong>Jellyfin</strong></td>
+          <td>Media streaming, one login per person</td>
+          <td><span class="tag tag-lan">all</span> <code>:8096</code></td>
+          <td>Me + roommates</td></tr>
+      <tr><td><strong>Syncthing</strong></td>
+          <td>Keeps my School/Work folder identical across my own devices</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:8384</code> admin<br>
+              <span class="tag tag-lan">all</span> <code>:22000</code> sync</td>
+          <td>Admin: me only<br>Sync: my devices</td></tr>
+      <tr><td><strong>Gluetun</strong></td>
+          <td>Holds the VPN tunnel, and owns the network namespace qBittorrent lives in</td>
+          <td><span class="tag tag-tailnet">tailnet</span> <code>:8080</code>,
+              on qBittorrent’s behalf</td>
+          <td>Me only</td></tr>
+      <tr><td><strong>qBittorrent</strong></td>
+          <td>Downloads, and files what it downloads into the library</td>
+          <td>Publishes nothing — it has no network of its own</td>
+          <td>Me only</td></tr>
+      <tr><td><strong>n8n</strong></td>
+          <td>Runs the school and work automations: Canvas deadlines into Google
+              Calendar and a morning brief</td>
+          <td>Nothing. Caddy reaches it as <code>n8n:5678</code></td>
+          <td>Me only</td></tr>
+      <tr><td><strong>ollama</strong></td>
+          <td>Local language model, CPU only — for reading dates out of instructor prose and composing the brief</td>
+          <td>Nothing. n8n reaches it as <code>ollama:11434</code></td>
+          <td>n8n only</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Where things live on disk</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Path</th><th>Holds</th></tr></thead>
+    <tbody>
+      <tr><td><code>~/homeserver/</code></td>
+          <td>The repo — what <em>defines</em> the server. <code>docker-compose.yml</code>
+              (every service), <code>Caddyfile</code> (every route),
+              <code>series-map.conf</code> (which show goes in which folder),
+              <code>bin/</code> (health check, backup, filing hook, previews),
+              <code>systemd/</code> (the timers), <code>docs/</code> (these pages)</td></tr>
+      <tr><td><code>~/homeserver/.env</code></td>
+          <td>Host values and every secret. Never committed</td></tr>
+      <tr><td><code>~/homeserver/config/</code></td>
+          <td>Live state: databases, keys, certificates. Never committed</td></tr>
+      <tr><td><code>~/data/school-work/</code></td>
+          <td>The synced folder. Deliberately outside the repo</td></tr>
+      <tr><td><code>/mnt/t7/</code></td>
+          <td>The external SSD: <code>Movies/</code>, <code>TV/</code>,
+              <code>downloads/</code>, <code>backups/</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    Keeping content outside the repo paid off literally. When the library moved from the
+    internal disk to the external SSD, <strong>one line of the compose file changed and
+    nothing else did</strong> — no re-adding libraries, no reconfiguring Jellyfin, no
+    lost watch history. Services address storage by container path, so the host can
+    rearrange itself underneath them.
+  </p>
+
+  <div class="note">
+    <span class="lbl">The same indirection has a sharp edge</span>
+    <p>
+      Containers see their own filesystem, not the host’s. Jellyfin’s library is
+      <code>/media/movies</code> from the inside even though it is
+      <code>/mnt/t7/Movies</code> from the outside. Typing the <em>host</em> path into a
+      service’s settings is the single most common way these setups fail to find their
+      own files.
+    </p>
+    <p>
+      And Docker’s default, when a folder it was told to mount does not exist, is to
+      create it empty. With the SSD unplugged, that default would hand Jellyfin two empty
+      folders and let it conclude the entire library had been deleted. Every bind onto
+      the T7 therefore sets <code>create_host_path: false</code>, so the container
+      refuses to start instead. A service that will not start is a five-second diagnosis;
+      a library that quietly erased its own watch history is not.
+    </p>
+  </div>
+</section>
+
+<section id="https">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Real certificates, with nothing exposed</h2></div>
+  <p>
+    Certificates are normally proven by answering a challenge from the public internet,
+    which is impossible here — nothing is exposed to the public internet, and that is the
+    point.
+  </p>
+  <p>
+    The way out: <strong>Tailscale issues genuine Let’s Encrypt certificates for the
+    machine’s private network name.</strong> Caddy talks to the Tailscale daemon through
+    a socket shared into its container, collects the certificate, and renews it on its
+    own. No domain was purchased, port 80 is never opened, no renewal job is scheduled,
+    and nothing was added to the LAN. The result verifies against the normal certificate
+    authorities — confirmed by connecting <em>without</em> the flag that skips
+    verification.
+  </p>
+
+  <div class="note note-info">
+    <span class="lbl">Why the URLs have port numbers</span>
+    <p>
+      Tailscale issues a certificate for one exact name, with no wildcard. The usual
+      trick of giving each service its own subdomain cannot work, because those names
+      would have no valid certificate.
+    </p>
+    <p>
+      The fallback — putting services on paths like <code>/syncthing</code> — fails for a
+      different reason: Syncthing’s interface calls its own API at absolute paths and
+      breaks underneath a prefix. So services are separated <em>by port</em> on the single
+      certified name. Slightly ugly URLs, in exchange for real certificates and working
+      interfaces.
+    </p>
+  </div>
+
+  <p>
+    This turned out to matter beyond tidiness. Google refuses <code>http://</code>
+    redirect URIs for anything that is not localhost, so no plain LAN address could ever
+    hold a Google Calendar credential. The Tailscale certificate on
+    <code>:8445</code> is what makes n8n’s OAuth redirect legal at all.
+  </p>
+</section>
+
+<section id="decisions">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Decisions worth defending</h2></div>
+  <p>
+    Each of these was a fork with a real alternative. The alternative and the cost are
+    named, because a decision recorded without its cost is just an assertion.
+  </p>
+
+  <div class="cards cards-2">
+
+    <div class="card" id="tailscale-host">
+      <span class="verdict">Exception to the rules</span>
+      <h3>Tailscale runs on the host, not in a container</h3>
+      <p>
+        Everything else here is containerised. This is not, because it is the
+        remote-access lifeline: if it lived in Docker and Docker failed to start after a
+        reboot, the way back into a headless machine would be gone with it.
+        Containerising it also requires handing the container broad network privileges,
+        which removes most of the isolation that made containerising it appealing.
+      </p>
+    </div>
+
+    <div class="card" id="vpn-sidecar">
+      <span class="verdict">Containment, not configuration</span>
+      <h3>The VPN is a sidecar container, not a host client</h3>
+      <p>
+        A VPN client on the host would route <em>everything</em> through NordVPN,
+        breaking Tailscale and the roommates’ access to Jellyfin. Scoping it back to one
+        process would mean hand-written policy routing and a hand-written kill switch.
+      </p>
+      <p>
+        Instead Gluetun owns a namespace whose only way out is the tunnel, and
+        qBittorrent joins that namespace rather than having one of its own. The kill
+        switch is structural: if the tunnel dies, qBittorrent has no interface to fall
+        back to. <a href="networking.html#vpn">Networking §04</a> has the mechanism and
+        the one non-obvious consequence.
+      </p>
+    </div>
+
+    <div class="card" id="downloads-t7">
+      <span class="verdict">Constraint, not preference</span>
+      <h3>Downloads land on the external SSD, beside the library</h3>
+      <p>
+        The internal disk looked obvious, because it supports hardlinks — the trick that
+        lets a download appear in the library without being copied. The T7 is exFAT for
+        Mac compatibility and cannot do that.
+      </p>
+      <p>
+        It turned out not to matter: the final hop from internal disk to external SSD
+        crosses drives and copies anyway, so the feature would be paid for and never
+        used. Putting downloads on the <em>same</em> drive as the library instead makes
+        filing an instant rename that moves no bytes at all. Free space settled the rest.
+      </p>
+    </div>
+
+    <div class="card" id="limits">
+      <span class="verdict">Forced by 7 GiB</span>
+      <h3>Every container has a memory ceiling</h3>
+      <p>
+        Added when n8n and ollama arrived. On a 7 GiB box, one leaking service takes down
+        playback for everyone, so each limit is set from a measured figure rather than a
+        guess — and deliberately generous where being wrong is expensive. Jellyfin gets
+        2 GiB because a limit that is too tight does not throttle a transcode, it
+        <em>kills</em> it mid-playback.
+      </p>
+      <p>
+        Node needs telling twice: it does not read the cgroup limit, so n8n also caps its
+        own heap, and its forked task runner caps a second heap that does not inherit the
+        first setting. ollama is capped at 3 of 4 CPU threads so a long generation can
+        never starve a transcode.
+      </p>
+    </div>
+
+    <div class="card" id="ollama-local">
+      <span class="verdict">Latency does not matter here</span>
+      <h3>The language model runs locally, slowly, for free</h3>
+      <p>
+        The jobs that need it run at 05:10 and 17:10; Jellyfin is used in the evenings.
+        A model that takes a minute to think costs nothing, where a hosted API costs money
+        and ships school content to a third party.
+      </p>
+      <p>
+        <code>OLLAMA_KEEP_ALIVE=0</code> unloads the weights the instant a request
+        finishes — the default holds ~2 GB resident for five minutes, which on this box is
+        the difference between coexisting and swapping. Swapping to a hosted model later
+        is three lines in <code>.env</code>, because every workflow calls an
+        <code>llm-complete</code> sub-workflow rather than an API directly.
+      </p>
+    </div>
+
+    <div class="card" id="rules-before-model">
+      <span class="verdict">The model has to earn the call</span>
+      <h3>A regex first, and the model only on what is left</h3>
+      <p>
+        Having a language model on the box creates a pull toward using it. The rule here is
+        that every job gets a deterministic attempt first, and the model is reached for only
+        where that provably fails — with the eval deciding, not the preference.
+      </p>
+      <p>
+        What survives for the model is the part no pattern reaches: a due date buried in an
+        instructor's paragraph, and turning structured state into a brief worth reading.
+      </p>
+    </div>
+
+    <div class="card" id="n8n-why">
+      <span class="verdict">Bought for one specific thing</span>
+      <h3>n8n rather than a script and a timer</h3>
+      <p>
+        For the Canvas sync alone a script would be simpler, and this box already has the
+        convention for one. What n8n actually buys is <strong>OAuth token
+        lifecycle</strong>: storing Google refresh tokens, noticing a 401, re-exchanging,
+        coping with revocation. That is the part that breaks silently three weeks later,
+        and hand-rolling it is the most tedious piece of the job.
+      </p>
+      <p>
+        It is used thin on purpose. n8n owns credentials, scheduling and delivery; the
+        real logic lives in Code nodes that can be read and version-controlled.
+      </p>
+    </div>
+
+    <div class="card" id="roommate-http">
+      <span class="verdict">Cost accepted</span>
+      <h3>Roommate traffic stays unencrypted</h3>
+      <p>
+        Giving roommates HTTPS would mean either buying a domain or installing a custom
+        certificate authority on every one of their phones and laptops. Both were
+        rejected in favour of leaving Jellyfin on plain HTTP inside the house, where the
+        WiFi’s own encryption covers the wire. The trade is explicit: those accounts use
+        throwaway passwords.
+      </p>
+    </div>
+
+    <div class="card" id="readonly">
+      <span class="verdict">Under review</span>
+      <h3>The media folder is mounted read-only</h3>
+      <p>
+        Jellyfin cannot write to the library, so no bug or bad setting can delete
+        anything. This was my call, not a stated requirement. It also blocks Jellyfin from
+        saving subtitles beside files, writing metadata sidecars, or deleting media from
+        its interface.
+      </p>
+      <p>
+        It does not affect the downloader, which has its own writable mount onto the same
+        folders — the boundary is drawn at Jellyfin’s door, not at the disk. One word to
+        change if the trade is not wanted.
+      </p>
+    </div>
+
+    <div class="card" id="no-samba">
+      <span class="verdict">Deliberate omission</span>
+      <h3>No Samba, no general file sharing</h3>
+      <p>
+        The obvious way to get files onto a home server is a network share. There is not
+        one, because a share visible to the house is exactly what the two-door design
+        exists to prevent. Media arrives by direct copy or from the downloader, neither of
+        which puts a share on the house network.
+      </p>
+    </div>
+
+    <div class="card" id="docs-localhost">
+      <span class="verdict">Open question again</span>
+      <h3>These pages are served on localhost, not the tailnet</h3>
+      <p>
+        Every other Caddy listener binds to the tailnet. This one binds to
+        <code>127.0.0.1</code>, chosen while the Mac could not route over the tailnet at
+        all — a tailnet binding would have been unreachable from the one machine that
+        wanted it. An SSH tunnel adds no network exposure and SSH already encrypts the
+        hop, so plain HTTP here costs nothing.
+      </p>
+      <p>
+        <strong>That constraint is gone as of 2026-09-20</strong>, so the binding is now a
+        free choice rather than a forced one. Moving it to the tailnet would drop the
+        tunnel step; keeping it on localhost keeps the docs off the network entirely.
+        Worth deciding deliberately rather than by inertia.
+      </p>
+    </div>
+
+    <div class="card" id="secret-caught">
+      <span class="verdict">Caught in review</span>
+      <h3>A password nearly went into git history</h3>
+      <p>
+        The build log contained a plaintext password in a note. It was found and removed
+        before the first commit, which matters because git history is permanent — a
+        private repository does not undo a committed secret, and deleting it later does
+        not either. Real config now lives at the repo’s top level, while state and keys
+        sit in an ignored directory.
+      </p>
+    </div>
+
+  </div>
+</section>
+
+<section id="repo">
+  <div class="sec-head"><span class="sec-num">06</span><h2>The repo is the server</h2></div>
+  <p>
+    Everything that <em>defines</em> this machine is a small number of text files in a
+    private repository: every service, every route, the build log, the helper scripts,
+    the show-to-folder table, the timers, these pages, a secrets template, and the list of
+    what to keep out. The machine itself is disposable — with the repo and a fresh Ubuntu
+    install, it comes back.
+  </p>
+  <p>
+    What is deliberately <em>not</em> in there matters just as much: no passwords, no
+    private keys, no databases, no media. <code>.env.example</code> lists which values are
+    needed without containing any of them, so the repository is reproducible without
+    being dangerous.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">The cost of that safety</span>
+    <p>
+      The excluded files exist only on this machine. Nothing in the repository could
+      restore Syncthing’s private key, and losing it means every paired device has to be
+      approved again by hand. <code>bin/homie-backup</code> exists to close exactly that
+      gap — it archives the things git is right to refuse — and since 2026-09-20 a systemd
+      timer runs it nightly rather than relying on anyone remembering.
+    </p>
+    <p>
+      One gap is still open: those backups land on the same physical drive as the media
+      they are meant to outlive. That covers deleting a file by accident and nothing else.
+      See <a href="operating-manual.html#gaps">the known gaps</a>.
+    </p>
+  </div>
+</section>
+
+<section id="next">
+  <div class="sec-head"><span class="sec-num">07</span><h2>What is next to build</h2></div>
+  <p>
+    This is the roadmap, not the fault list. Things that are broken or missing today live
+    in <a href="operating-manual.html#gaps">Operating manual §07</a>.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Thing</th><th>State</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>The school automations</strong></td>
+        <td><span class="tag tag-ok">Infrastructure built</span></td>
+        <td>n8n, ollama, the state database, the timers and the check script all run.
+            Zero workflows exist yet, because each needs a credential only I can fetch by
+            hand.</td>
+      </tr>
+      <tr>
+        <td><strong>Indexer search</strong></td>
+        <td><span class="tag">Not started</span></td>
+        <td>Downloading and filing are automatic; finding a release to hand the
+            downloader is still done by hand. Prowlarr would sit in front of qBittorrent
+            and must address it as <code>gluetun</code>, not <code>qbittorrent</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>A local assistant over these docs</strong></td>
+        <td><span class="tag">Designed, not built</span></td>
+        <td>Ask “how do I restart the VPN?” and get the answer with the section it came
+            from. Designed as <em>retrieval</em>, not fine-tuning: the corpus is small and
+            changes weekly, so a fine-tune would bake in a stale snapshot and state it
+            confidently. Keep the model deliberately dumb and make every fact it says text
+            retrieved a half-second earlier.</td>
+      </tr>
+      <tr>
+        <td><strong>The same idea over coursework</strong></td>
+        <td><span class="tag">Waiting on hardware</span></td>
+        <td>Pointed at the synced School/Work folder. The retrieval half needs no GPU and
+            could be built now; a model big enough to sit on top of it is what waits.</td>
+      </tr>
+      <tr>
+        <td><strong>The stranded 135 GB</strong></td>
+        <td><span class="tag">Parked</span></td>
+        <td>Moving media to the SSD left the internal disk holding little more than the
+            OS, so the pressure that made this interesting is gone.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  <span>homie · <span class="mono">192.168.1.10</span> · <span class="mono">100.64.0.10</span></span>
+  <span>Verified against the running system 20 Sep 2026</span>
+</footer>
+
+</div>
+</body>
+</html>

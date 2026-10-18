@@ -1,0 +1,461 @@
+# ~/homeserver/docker-compose.yml
+# One service block per app.
+#
+# PORT BINDING RULE (important — Docker bypasses ufw for published ports):
+#   admin UIs      -> "${TAILNET_IP}:PORT:PORT"  (reachable over Tailscale only)
+#   Caddy-only     -> "127.0.0.1:PORT:PORT"      (localhost, fronted by reverse proxy)
+#   genuinely LAN  -> "PORT:PORT"                (e.g. Jellyfin for roommates)
+#   Caddy-only,    -> no ports: block at all      (BEST — see n8n/ollama below. Caddy
+#   nothing else                                   reaches them by container name over
+#                                                  homeserver_default, so there is no
+#                                                  host socket to bind or mis-bind.)
+#
+# Every image is pinned to an exact tag. ':latest' is a moving pointer, not a version —
+# the next pull silently changes what runs. Upgrade deliberately: bump the tag, run
+# 'docker compose up -d <service>', verify, commit. Roll back = revert the commit.
+
+services:
+  # Personal School/Work sync across my own devices only. Contents kept as plain text
+  # / Markdown / PDF so a future local LLM can index them.
+  syncthing:
+    image: syncthing/syncthing:2.1.3
+    container_name: syncthing
+    # Measured 17 MB anon. Headroom is for a full folder rescan.
+    mem_limit: 512m
+    hostname: homie
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./config/syncthing:/var/syncthing/config
+      - ${HOME}/data/school-work:/var/syncthing/school-work
+    ports:
+      # Web/admin UI — Tailscale only. Full control over my files; must NOT be on the LAN.
+      - "${TAILNET_IP}:8384:8384"
+      # Sync protocol — safe on all interfaces: TLS encrypted and each peer must be
+      # approved by device ID. LAN-visible so local syncs go at LAN speed.
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+      # Local discovery broadcast.
+      - "21027:21027/udp"
+    restart: unless-stopped
+
+  # Media streaming for me + roommates, separate login each.
+  # DELIBERATELY LAN-visible on 8096 (unlike Syncthing) because roommates need it.
+  jellyfin:
+    image: jellyfin/jellyfin:10.11.11
+    container_name: jellyfin
+    # Measured 246 MB anon resident. Deliberately generous: a limit that is too tight
+    # does not throttle a transcode, it KILLS it mid-playback. 2g is far above any
+    # VAAPI transcode.
+    mem_limit: 2g
+    user: "${PUID}:${PGID}"
+    # Intel Quick Sync (HD Graphics 620): hardware H.264 + HEVC encode/decode.
+    # Without this every transcode is CPU-only on a 4-thread i5 and will stutter.
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "${RENDER_GID}"
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./config/jellyfin/config:/config
+      - ./config/jellyfin/cache:/cache
+      # Media lives on the T7 external SSD (exFAT, mounted at /mnt/t7 via fstab).
+      #
+      # READ-WRITE, so media can be deleted from the Jellyfin UI. This was read_only,
+      # on the reasoning that Jellyfin never needs to write to the library and so a bug
+      # or a bad metadata setting could not destroy media. That protection is genuinely
+      # gone now, and it is worth being clear about what it was holding back: deletion
+      # here is immediate and total. exFAT has no trash, Jellyfin has no recycle bin,
+      # and bin/homie-backup deliberately does not cover media ("re-acquirable, and it
+      # would not fit alongside itself"). A mis-click is a re-download, not an undo.
+      #
+      # Deletion is gated in a second place as well, and BOTH have to be open for it to
+      # happen: a Jellyfin user needs "Allow media deletion from" ticked for the library
+      # in Dashboard -> Users. Leaving that off for the roommates' accounts is what keeps
+      # this bind from meaning everyone can delete everything.
+      #
+      # create_host_path: false is load-bearing. Docker's default is to CREATE a
+      # missing bind source as an empty directory. If the T7 were unplugged at boot,
+      # that default would hand Jellyfin two empty folders and it would conclude the
+      # entire library had been deleted. This makes the container refuse to start
+      # instead — a loud, obvious failure rather than a silent, destructive one.
+      - type: bind
+        source: /mnt/t7/Movies
+        target: /media/movies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/t7/TV
+        target: /media/shows
+        bind:
+          create_host_path: false
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+
+  # Reverse proxy. Certs come from Tailscale (real Let's Encrypt, auto-renewed via the
+  # tailscaled socket), so no ACME challenge and no port 80 is needed. Ports bound to
+  # the tailnet only: nothing outside the tailnet can resolve this name.
+  caddy:
+    image: caddy:2.11.4
+    container_name: caddy
+    # Measured 8 MB anon. It proxies; it does not buffer media.
+    mem_limit: 256m
+    environment:
+      - TZ=${TZ}
+    volumes:
+      # A folder, not the single file, for the same stale-inode reason as qBittorrent's
+      # ./hooks: 'caddy reload' after a git pull would otherwise re-read the old file.
+      - ./caddy:/etc/caddy:ro
+      - ./config/caddy/data:/data
+      - ./config/caddy/config:/config
+      # Read/write socket: Caddy uses it to fetch and renew the Tailscale cert.
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+      # The explainer pages, served read-only on 8446 so they can be read in a real
+      # browser instead of as stripped text. read_only because a file server has no
+      # business writing to the thing it is serving.
+      - ./docs:/srv/docs:ro
+    ports:
+      - "${TAILNET_IP}:443:443"
+      - "${TAILNET_IP}:8443:8443"
+      # 8444 -> qBittorrent WebUI
+      - "${TAILNET_IP}:8444:8444"
+      # 8445 -> n8n editor UI
+      - "${TAILNET_IP}:8445:8445"
+      # 8446 -> the docs, and the ONLY port here bound to 127.0.0.1 rather than the
+      # tailnet. Kept on localhost because the docs need no network at all: localhost
+      # plus an SSH tunnel adds no exposure to the LAN or even the tailnet, and SSH
+      # already encrypts it, so plain HTTP here costs nothing. Reach it with:
+      #     ssh -L 8446:localhost:8446 homie-lan
+      # then open http://localhost:8446 on the Mac.
+      - "127.0.0.1:8446:8446"
+    restart: unless-stopped
+
+  # VPN tunnel for the torrent client ONLY.
+  #
+  # This container exists to own a network namespace that has exactly one way out: a
+  # WireGuard tunnel to NordVPN. qbittorrent then joins THIS namespace instead of having
+  # its own (see network_mode on that service). Nothing else on the box is affected —
+  # Jellyfin, Syncthing, Caddy, Tailscale and SSH all still use the normal connection.
+  #
+  # Why a sidecar container rather than a VPN client on the host: a host-level client
+  # would route EVERYTHING through Nord, breaking Tailscale and the roommates' LAN access
+  # to Jellyfin. Scoping it back to one process would mean hand-written policy routing and
+  # a hand-written kill switch. This gets the same result with a containment boundary the
+  # kernel enforces, and it stays inside Docker Compose where the rest of the stack lives.
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.3
+    container_name: gluetun
+    # Measured 98 MB anon, and flat — a tunnel has no reason to grow.
+    mem_limit: 256m
+    # NET_ADMIN is required and is not optional flexibility: this container's whole job is
+    # to create a network interface and install firewall rules inside its own namespace.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      # NordLynx is Nord's WireGuard. The key is NOT shown in their dashboard; it comes
+      # from their API. It is a secret — .env only.
+      - WIREGUARD_PRIVATE_KEY=${NORD_WG_PRIVATE_KEY}
+      # Nord permits P2P only on certain servers; landing on any other one means torrents
+      # silently do not connect. This constrains every pick, including reconnects.
+      - SERVER_CATEGORIES=P2P
+      # Constrain to US exits too. Without this, a reconnect can land anywhere Nord has a
+      # P2P server — it came up in Phoenix, then reconnected to Edinburgh, and every peer
+      # round trip crossed the Atlantic. Country only, not a fixed server: keeping several
+      # candidates means a reconnect still has somewhere to go.
+      - SERVER_COUNTRIES=United States
+      # THE KILL SWITCH'S ONE EXCEPTION, and the thing that will look like a broken VPN if
+      # it is ever removed. Gluetun drops anything leaving this namespace that is not
+      # going out the tunnel. Caddy's request to the WebUI arrives fine, but qBittorrent's
+      # REPLY is a packet leaving for 172.18.0.4 — not the tunnel — so it gets dropped and
+      # the WebUI just hangs. These three private ranges (docker bridge, tailnet, LAN) are
+      # allowed out the normal way. None of them can reach the public internet, so this
+      # weakens nothing: real internet destinations still have exactly one road.
+      - FIREWALL_OUTBOUND_SUBNETS=172.18.0.0/16,100.64.0.0/10,192.168.1.0/24
+      - TZ=${TZ}
+    volumes:
+      - ./config/gluetun:/gluetun
+    ports:
+      # qBittorrent's WebUI, published here because qbittorrent shares this namespace and
+      # can no longer publish anything of its own. Same rule as everything else: admin UI,
+      # tailnet only.
+      - "${TAILNET_IP}:8080:8080"
+    restart: unless-stopped
+
+  # BitTorrent client.
+  qbittorrent:
+    # linuxserver's image (not the qbittorrent org's) for the PUID/PGID support the
+    # exFAT mount requires — see the ownership note below.
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    container_name: qbittorrent
+    # Measured 15 MB anon resident. The alarming 2.1 GB it shows in `docker stats` is
+    # 1.7 GB of RECLAIMABLE page cache from torrent I/O — the kernel drops it the moment
+    # anything else needs the memory. Do not size this limit off that number.
+    mem_limit: 1g
+    environment:
+      # The T7 is exFAT, mounted uid=1000,gid=1000,fmask=0133,dmask=0022. Ownership is
+      # fixed at MOUNT time and cannot be changed per-file: every file on that drive is
+      # admin:admin 644 no matter which uid wrote it, and chmod/chown simply fail.
+      # So PUID/PGID must be 1000 to match, and any "run external program"/permission
+      # fixing must stay off. Note HOW it fails: chmod and chown against exFAT return
+      # exit code 0 and silently change nothing. There is no error to notice — the
+      # setting simply has no effect, which is worse than a loud failure.
+      #
+      # qBittorrent's "Run external program" is NOT covered by this and is safe to use;
+      # it runs a command, it does not set permissions. Its own exFAT catch is different:
+      # a hook script cannot LIVE on the T7, because chmod +x silently no-ops there and
+      # the file stays 644 (mode fixed by fmask=0133 at mount). Put hook scripts under
+      # ./config/qbittorrent/ instead — that is on the internal ext4 disk, where +x works,
+      # and the container already sees it at /config.
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+      # Peer listening port. Declared here so it matches the ports: block on gluetun.
+      - TORRENTING_PORT=6881
+      # Read by the /hooks/qbt-file filing hook so it can drop a torrent from the
+      # client once its files have been moved into the library (files are KEPT).
+      # These are qBittorrent's own WebUI credentials being handed back to a script
+      # running inside qBittorrent — no new secret, and they stay out of this file.
+      - QBIT_WEBUI_USER=${QBIT_WEBUI_USER}
+      - QBIT_WEBUI_PASS=${QBIT_WEBUI_PASS}
+    volumes:
+      - ./config/qbittorrent:/config
+      # The "Run on torrent finished" hook, plus the show->folder table it reads.
+      # Read-only, and bound from ./hooks (internal ext4) rather than the T7 on purpose:
+      # chmod +x silently no-ops on exFAT, so a script stored there can never execute.
+      # Keeping them in the repo also means the filing logic is version controlled,
+      # unlike anything under config/ (gitignored).
+      #
+      # A FOLDER, never single files. A single-file bind pins the file's inode, and any
+      # save that writes a new file and renames it over the old one — git checkout/pull,
+      # most editors' atomic save — leaves the container reading the OLD inode, silently,
+      # until the container restarts. That happened on 2026-09-23: a fix sat in the repo
+      # while the live hook ran the previous version. A folder bind resolves names at
+      # open time, so every save is live immediately. homie-check compares the two.
+      - ./hooks:/hooks:ro
+      # The WHOLE T7, as ONE mount, at the same path as on the host. Downloads
+      # (/mnt/t7/downloads) and the library (/mnt/t7/TV, Movies) must share a
+      # single mount for qbt-file's move to be a rename: Linux refuses rename(2) across
+      # two mount points even when both are the same filesystem (EXDEV), and
+      # shutil.move then silently falls back to copy+delete. With the four separate
+      # binds this replaced, filing one 1080p episode took 30 minutes and briefly
+      # needed its size twice. Same path inside and out also means the hook's log
+      # lines are paths you can paste on the host.
+      #
+      # Read-WRITE, unlike Jellyfin's binds: this is the container that puts files into
+      # the library. Jellyfin's own binds stay read_only and are unaffected.
+      #
+      # create_host_path: false does NOT protect this one. /mnt/t7 exists as an empty
+      # directory on the root disk even with the T7 unplugged, so Docker would mount
+      # that and qBittorrent would download a library into the 100 GB root, hidden the
+      # moment the drive came back. The backups bind below is what guards it.
+      - type: bind
+        source: /mnt/t7
+        target: /mnt/t7
+        bind:
+          create_host_path: false
+      # Laid back over the top READ-ONLY, doing two jobs:
+      #   1. a torrent client has no business being able to write to the config
+      #      archives (the only copy of .env outside this machine's own disk);
+      #   2. it is the unplugged-T7 guard. /mnt/t7/backups exists only ON the T7 —
+      #      homie-backup refuses to create it unless /mnt/t7 is a mountpoint — so with
+      #      the drive absent this source is missing and the container will not start.
+      # If backups ever move off the T7, job 2 moves with them: replace this with
+      # another T7-only path before deleting it. Books/AudioBooks stay writable here;
+      # they are media, like everything else this container can already touch.
+      - type: bind
+        source: /mnt/t7/backups
+        target: /mnt/t7/backups
+        read_only: true
+        bind:
+          create_host_path: false
+    # qBittorrent has no network namespace of its own; it shares gluetun's. Its ONLY
+    # route out is gluetun's wg0 tunnel. That is the kill switch, and it is structural
+    # rather than configured: if gluetun stops, this container has no network interface
+    # at all, so it cannot fall back to the house connection and cannot leak.
+    #
+    # Two consequences to keep in mind when changing things:
+    #   - it can publish nothing itself, so its ports: block lives on gluetun.
+    #   - anything addressing it BY NAME must say `gluetun`, because `qbittorrent` does
+    #     not resolve to an IP. The Caddyfile says reverse_proxy gluetun:8080;
+    #     Sonarr/Radarr, when they arrive, must use host `gluetun` too.
+    #   - the peer port stays unpublished: the swarm knows us by the Nord exit IP, so a
+    #     forward on our own router would sit on an address no peer ever dials.
+    #     See docs/networking.html#inbound.
+    network_mode: service:gluetun
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+
+  # n8n — the automation orchestrator. Runs the school/work workflows: Canvas deadlines
+  # into Google Calendar, the 05:30 morning brief, and the Discord class watcher.
+  #
+  # WHY n8n AND NOT A SCRIPT PLUS A TIMER. For the Canvas sync alone, a script would be
+  # simpler and this box already has the convention for one. What n8n actually buys is
+  # OAuth token lifecycle: storing refresh tokens for Google Calendar and Gmail, noticing
+  # a 401, re-exchanging, and coping with revocation. That is the part that breaks
+  # silently three weeks later, and hand-rolling it is the most tedious piece of the job.
+  # Used thin, though: n8n owns credentials, scheduling and delivery. The real logic
+  # (ICS parsing, dedup keys, cadence inference) lives in Code nodes that can be read.
+  #
+  # NO PUBLISHED PORT — deliberate, and the fourth case in the rule at the top of this
+  # file. Caddy reaches it as `n8n:5678` over homeserver_default. Nothing binds a host
+  # socket, so there is nothing to accidentally expose to the LAN.
+  #
+  # NOT ON gluetun's NAMESPACE, also deliberate. n8n talks to Canvas, Google, Discord and
+  # (optionally) a hosted LLM. Routing that through NordVPN would add a failure mode and
+  # would make Google's sign-in risk checks unhappy about an exit IP that moves.
+  n8n:
+    image: n8nio/n8n:2.40.3
+    container_name: n8n
+    # n8n 2.x forks a SECOND node process (the task runner, which executes Code nodes),
+    # so an "idle" install is two heaps, not one: 516 MB anon / 850 MB peak including
+    # cache. A 1g limit left only ~170 MB of anon headroom. 1.5g is the honest number.
+    # Check with: docker exec n8n ps -o pid,rss,args
+    mem_limit: 1536m
+    user: "${PUID}:${PGID}"
+    environment:
+      - TZ=${TZ}
+      # n8n reads GENERIC_TIMEZONE for Schedule triggers. Without it, cron expressions
+      # silently run in UTC and the "05:30 brief" arrives at 22:30 the previous day.
+      - GENERIC_TIMEZONE=${TZ}
+
+      # THE ONE VALUE THAT MUST NEVER CHANGE. Every stored credential (Google refresh
+      # tokens, Discord bot token, SMTP password) is encrypted with this. Change it or
+      # lose it and they are not "log in again" — they are unrecoverable ciphertext and
+      # the entire Google OAuth flow gets redone from scratch. It lives in .env, which is
+      # 0600 and gitignored, and is captured by bin/homie-backup. Keep a copy off-box.
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+
+      # Identity. n8n builds its own OAuth redirect URL from these, so they must match
+      # what is registered in Google Cloud exactly, port included.
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=${N8N_PUBLIC_URL}
+      - WEBHOOK_URL=${N8N_PUBLIC_URL}
+      # Exactly one proxy in front (Caddy). Without this n8n either distrusts
+      # X-Forwarded-* and builds http:// URLs, or trusts too many hops.
+      - N8N_PROXY_HOPS=1
+      - N8N_SECURE_COOKIE=true
+
+      # Node does NOT read the cgroup limit above. Without this cap it grows its heap
+      # past 1g and the kernel OOM-kills the container instead of Node running a GC.
+      # The heap ceiling must sit BELOW mem_limit, with room for non-heap allocations.
+      - NODE_OPTIONS=--max-old-space-size=768
+      # The forked task runner has its OWN heap and does not inherit NODE_OPTIONS.
+      # 768 + 384 = 1152 MB of heap ceiling, comfortably under the 1536 MB cgroup cap.
+      - N8N_RUNNERS_MAX_OLD_SPACE_SIZE=384
+
+      # SQLite, not Postgres: one user, one worker, a few thousand rows. Postgres would
+      # cost ~250 MB to solve a problem this box does not have.
+      # Pruning is not optional housekeeping — without it the execution history grows
+      # without bound and is the classic way an n8n install eats a disk.
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=5000
+      - DB_SQLITE_VACUUM_ON_STARTUP=true
+
+      # Quiet, and no phoning home.
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=false
+      - N8N_HIRING_BANNER_ENABLED=false
+      - N8N_LOG_LEVEL=info
+
+      # Pinned because n8n warned at startup that these defaults will CHANGE in a future
+      # version. Same principle as the image tags: a value that moves on its own is not a
+      # configuration. These are the values we actually want, not merely the current ones.
+      # The two compression caps are deliberately set to the SMALLER future defaults;
+      # this box has 7 GiB and no reason to buffer 2 GiB of zip.
+      - N8N_UNVERIFIED_PACKAGES_ENABLED=false
+      - N8N_RUNNERS_TASK_TIMEOUT=300
+      - N8N_COMPRESSION_NODE_MAX_DECOMPRESSED_SIZE_BYTES=268435456
+      - N8N_COMPRESSION_NODE_MAX_ZIP_ENTRIES=1000
+
+      # Where the LLM lives. Swapping local <-> hosted is these three lines and nothing
+      # else, because every workflow calls the `llm-complete` sub-workflow rather than an
+      # API directly. Default is the local ollama below.
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL=${LLM_MODEL}
+      - LLM_API_KEY=${LLM_API_KEY}
+
+      # Code-node module allowlist. Two things the workflows cannot be written without:
+      #   crypto  sha1 dedup keys. canvas-sync derives each Google Calendar event id as
+      #           sha1("canvas:" + UID) so the sync is insert-or-patch and can never
+      #           create duplicates -- see bin/canvas-preview for the reasoning.
+      #   sqlite  the state DB at /state. This container has NO sqlite3 CLI and no
+      #           better-sqlite3, so without this there is no way at all to write
+      #           automation.db. Node 26 ships `node:sqlite` built in, so this needs an
+      #           allowlist entry rather than a new dependency.
+      # UNVERIFIED: that the forked task runner honours this. If a Code node cannot
+      # require('node:sqlite'), this is the line to look at.
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto,sqlite
+
+      # Workflow credentials. n8n only ever sees variables named here -- compose does not
+      # forward .env wholesale. Adding a credential to .env without adding it here is a
+      # silent no-op.
+      - CANVAS_ICS_URL=${CANVAS_ICS_URL}
+      - GCAL_CANVAS_ID=${GCAL_CANVAS_ID}
+      - DISCORD_BRIEF_WEBHOOK=${DISCORD_BRIEF_WEBHOOK}
+      - WEATHER_LAT=${WEATHER_LAT}
+      - WEATHER_LON=${WEATHER_LON}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO}
+    volumes:
+      # n8n's own state: its SQLite DB, encrypted credentials, and settings.
+      - ./config/n8n:/home/node/.n8n
+      # The automation state DB — dedup cursors, classified messages, subscription
+      # history, run_log. Deliberately SEPARATE from n8n's own database so it survives
+      # an n8n reinstall and can be inspected with sqlite3 without touching n8n.
+      - ./config/n8n/state:/state
+      # Workflow JSON, version controlled. n8n stores workflows in its gitignored SQLite
+      # DB, so without this the automation logic would exist nowhere in git.
+      - ./workflows:/workflows
+      # Test fixtures, read-only. bin/wf-preview hands every Code node
+      # __FIXTURES__=/workflows/../tests/fixtures, which resolves to /tests/fixtures
+      # INSIDE this container -- so without this mount the harness cannot dry-run any
+      # workflow that ingests external data. Read-only: the container has no business
+      # writing to the fixtures that define its own tests.
+      - ./tests:/tests:ro
+    restart: unless-stopped
+
+  # ollama — local LLM inference, CPU only.
+  #
+  # LATENCY DOES NOT MATTER HERE. The classification and summarisation jobs run at 05:10
+  # and 17:10; Jellyfin is used in the evenings. A model that takes a minute to think is
+  # free, where a hosted API costs money and ships school content to a third party.
+  #
+  # THE TWO SETTINGS THAT KEEP THIS FROM HURTING JELLYFIN:
+  #   OLLAMA_KEEP_ALIVE=0  unloads the model from RAM the instant a request finishes.
+  #                        The default is 5 minutes of holding ~2 GB resident, which on a
+  #                        7 GiB box is the difference between coexisting and swapping.
+  #   cpus: 3.0            hard ceiling at 3 of 4 threads, so a long generation can never
+  #                        starve a transcode of every core.
+  ollama:
+    image: ollama/ollama:0.34.2
+    container_name: ollama
+    # A 3B model at Q4 is ~2 GB of weights plus context and runtime overhead.
+    mem_limit: 3g
+    cpus: 3.0
+    user: "${PUID}:${PGID}"
+    environment:
+      - TZ=${TZ}
+      # Not /root/.ollama: this container runs as uid 1000, which cannot write /root.
+      - OLLAMA_MODELS=/models
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_KEEP_ALIVE=0
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=1
+    volumes:
+      - ./config/ollama:/models
+    # No ports, same reasoning as n8n. Reached as `ollama:11434` from n8n only; it is
+    # not exposed to the tailnet, the LAN, or Caddy.
+    restart: unless-stopped

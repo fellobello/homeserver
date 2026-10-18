@@ -1,0 +1,130 @@
+# ~/homeserver/config/caddy/Caddyfile
+#
+# TLS comes from Tailscale, not ACME. Caddy detects the .ts.net name and fetches the
+# cert (and renews it) over the mounted tailscaled socket. No port 80, no ACME
+# challenge, nothing new exposed to the LAN.
+#
+# Tailscale issues a cert for the node name ONLY — no wildcards. So services are
+# separated by PORT on the one hostname rather than by subdomain. Subpaths were
+# rejected because Syncthing's UI calls absolute /rest/... paths and breaks under one.
+
+# Jellyfin — my access, from anywhere on the tailnet, with real HTTPS.
+# Roommates keep using http://192.168.1.10:8096 directly on the LAN.
+homie.tailnet-name.ts.net {
+	reverse_proxy jellyfin:8096
+}
+
+# Syncthing admin UI — replaces http://100.64.0.10:8384
+homie.tailnet-name.ts.net:8443 {
+	reverse_proxy syncthing:8384
+}
+
+# qBittorrent WebUI — replaces http://100.64.0.10:8080
+# Port 8444, because Tailscale certs cover the node name only (no wildcards), so
+# services are separated by port rather than subdomain.
+#
+# These three header_up lines are REQUIRED — Jellyfin and Syncthing need nothing like
+# them. qBittorrent runs two checks that both fail behind a port-based proxy, and each
+# one 401s with a bare "Unauthorized" (the real reason is only in its own log, at
+# config/qbittorrent/qBittorrent/logs/):
+#
+#   1. Host validation compares the Host header's PORT against its own listening port.
+#      Caddy passes the original Host through, so qBittorrent sees ":8444", compares it
+#      to 8080, and rejects: "Invalid Host header, port mismatch". Whitelisting the name
+#      in Server Domains does NOT help — the port check is separate.
+#   2. CSRF compares Origin/Referer against the target origin derived from Host. Fixing
+#      only Host therefore breaks this one instead: "Referer header & Target origin
+#      mismatch".
+#
+# So all three headers are rewritten to the origin qBittorrent believes it is serving:
+# http, the whitelisted node name, and its real internal port 8080. Note http:// and
+# 8080 are deliberate and not a typo — this is the INTERNAL hop, Caddy to container.
+# The browser's connection is still HTTPS on 8444.
+#
+# THE VPN LANDED 2026-09-02: upstream is now gluetun:8080, because qBittorrent shares
+# gluetun's network namespace and the name `qbittorrent` no longer resolves to any IP.
+# The three header_up values below did NOT change — qBittorrent's own listening port is
+# still 8080; only which container's namespace holds that port changed.
+# THE THREE header_up LINES ARE GONE — 2026-09-21. They faked an origin of
+# "homie.tailnet-name.ts.net:8080" to satisfy two qBittorrent checks that a port-based
+# reverse proxy cannot otherwise pass. Both checks are now switched off at the source
+# instead, in qBittorrent.conf:
+#
+#   WebUI\HostHeaderValidation=false      <- the decisive one. The port check compares
+#       the Host header's port against qBittorrent's own listening port (8444 vs 8080)
+#       and 401s. It is SEPARATE from reverse-proxy support and is not covered by it —
+#       with the rewrites removed but this still on, every request failed
+#       "Invalid Host header, port mismatch".
+#   WebUI\ReverseProxySupportEnabled=true  <- makes it read X-Forwarded-* rather than
+#       inventing an origin from Host, which is what lets the browser's real
+#       https://...:8444 Origin pass CSRF untouched.
+#
+# WHY SWITCH THEM OFF RATHER THAN KEEP FAKING THEM. Both are defences against a
+# hostile browser on an untrusted network reaching a WebUI published to the world.
+# This one is published on the tailnet address only (see gluetun's ports: block), so
+# the network boundary already does that job and the checks were only ever costing
+# three lines of rewrite here plus a class of 401 that reports itself as
+# "Unauthorized" and hides the real reason in a container log.
+#
+# THE SIDE EFFECT THAT MATTERS MOST: qBittorrent used to see every request as coming
+# from Caddy (172.18.0.6), so its brute-force lockout banned the PROXY — locking out
+# every device on the tailnet at once, which is exactly what happened on 2026-09-21.
+# With X-Forwarded-For honoured it sees real client IPs, which is also what makes the
+# auth-bypass whitelist on 100.64.0.0/10 a real statement rather than a blanket
+# exemption for anything that can reach the proxy.
+#
+# ONE MORE TRAP, in case these ever get re-tightened: WebUI\Address was "*", which
+# binds dual-stack and made qBittorrent report peers as "::ffff:172.18.0.6". It
+# matches those IPv4-mapped addresses against no IPv4 CIDR at all, so both the
+# whitelist and the trusted-proxy list silently never matched. It is 0.0.0.0 now.
+homie.tailnet-name.ts.net:8444 {
+	reverse_proxy gluetun:8080
+}
+
+# n8n editor UI — added with Step 13 (2026-09-19).
+# Port 8445, next in the sequence, for the same no-wildcards reason as 8443/8444.
+#
+# THIS BLOCK IS WHAT MAKES GOOGLE OAUTH POSSIBLE AT ALL. Google refuses http:// redirect
+# URIs for anything that is not localhost, so a plain LAN address could never hold the
+# Google Calendar credential. The Tailscale-issued cert here gives a real https:// origin,
+# which makes the registered redirect URI legal:
+#     https://homie.tailnet-name.ts.net:8445/rest/oauth2-credential/callback
+#
+# No header_up rewrites needed — unlike qBittorrent on 8444, n8n reads X-Forwarded-*
+# correctly. It is told there is exactly one proxy hop via N8N_PROXY_HOPS=1.
+# Websockets (the editor's live execution view) work through reverse_proxy untouched.
+homie.tailnet-name.ts.net:8445 {
+	reverse_proxy n8n:5678
+}
+
+# The explainer pages, in a real browser — added Step 13b (2026-09-20).
+#
+# NO HOSTNAME on this block, and no TLS, both deliberate. It is published only on
+# 127.0.0.1, so the only way in is an SSH tunnel:
+#
+#     ssh -L 8446:localhost:8446 homie-lan      # then http://localhost:8446
+#
+# Plain HTTP is not a downgrade here — SSH is already encrypting the whole hop, and
+# a hostname-matched TLS site would reject a browser sending "Host: localhost:8446"
+# anyway. There is no ${TAILNET_IP} binding because when this was written the Mac's
+# tailnet did not route -- a tailnet-only docs site would have been unreachable from
+# the one machine that wanted it. THAT WAS FIXED 2026-09-20 (the cause was an ACL
+# granting only autogroup:internet, not either machine), so this binding is now a
+# free choice rather than a forced one. Left on localhost deliberately: the docs are
+# the one thing with no reason to be on any network. Add a tailnet block if that
+# stops being convenient.
+#
+# The pages render their own SVG diagrams, which is the whole point — bin/homie-docs
+# strips those, so this is the only way to actually see the wiring diagram locally.
+:8446 {
+	root * /srv/docs
+
+	# Serve the Markdown working notes as plain text. Caddy labels .md as
+	# text/markdown, which browsers download instead of displaying -- so the
+	# links to them from index.html would fire a save dialog rather than open
+	# the page. They are read, not installed; text/plain renders them inline.
+	@md path *.md
+	header @md Content-Type "text/plain; charset=utf-8"
+
+	file_server browse
+}

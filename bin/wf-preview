@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""wf-preview — dry-run an n8n workflow and show exactly what it would produce.
+
+WHY THIS EXISTS. Every workflow on this box is blocked on a credential, so without
+this the only way to see whether the logic is right is to finish the whole OAuth
+walk first and then debug in a browser. That is backwards: the logic is the part
+worth reviewing, and it needs no credentials at all.
+
+WHAT IT ACTUALLY DOES. It reads workflows/<name>.json -- the SAME file n8n imports,
+not a copy -- walks the node graph, and:
+
+  Code nodes        executed for real, in the n8n container's own Node runtime, with
+                    a shim for $input / $env / $now. So a pass here means that exact
+                    jsCode runs.
+  HTTP / Discord /  NOT executed. Printed instead: method, URL, headers and body, so
+  Google / email    you can read what would have been sent or written.
+  Schedule trigger  printed as its cron expression.
+
+WHAT IT IS NOT. A simulator, not n8n. It proves the transformation logic and shows
+the outbound payloads. It does NOT prove node wiring, credential setup, or n8n's own
+expression evaluation in non-Code nodes -- those only get proven by a real run. The
+summary line says so every time, on purpose.
+
+Usage:
+    wf-preview                       list workflows, their nodes and their triggers
+    wf-preview canvas-sync           dry run against the checked-in fixture
+    wf-preview canvas-sync --live    fetch real input if the credential exists in .env
+    wf-preview canvas-sync --json    machine-readable, for diffing between edits
+    wf-preview --all                 dry run every workflow, exit 1 if any fails
+"""
+import argparse, json, os, re, subprocess, sys, textwrap, datetime
+
+REPO = os.path.expanduser('~/homeserver')
+WF = os.path.join(REPO, 'workflows')
+FIX = os.path.join(REPO, 'tests', 'fixtures')
+DRIVER = os.path.join(WF, '.wf-preview-run.mjs')
+
+C = {'dim': '\033[2m', 'b': '\033[1m', 'g': '\033[32m', 'r': '\033[31m',
+     'y': '\033[33m', 'c': '\033[36m', '0': '\033[0m'}
+if not sys.stdout.isatty():
+    C = {k: '' for k in C}
+
+
+def load_env():
+    p = os.path.join(REPO, '.env')
+    out = {}
+    if os.path.exists(p):
+        for line in open(p):
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                k, v = line.split('=', 1)
+                out[k.strip()] = v.strip()
+    return out
+
+
+# ---------------------------------------------------------------- node graph
+
+def node_order(wf):
+    """Return nodes in execution order. These workflows are linear chains, so a
+    walk from the trigger down `connections` is exact -- not a topological guess."""
+    by_name = {n['name']: n for n in wf['nodes']}
+    conns = wf.get('connections', {})
+    targets = {t['node']
+               for c in conns.values()
+               for group in c.get('main', [])
+               for t in (group or [])}
+    starts = [n for n in wf['nodes'] if n['name'] not in targets]
+    order, seen = [], set()
+
+    def walk(name):
+        if name in seen or name not in by_name:
+            return
+        seen.add(name)
+        order.append(by_name[name])
+        for group in conns.get(name, {}).get('main', []) or []:
+            for t in (group or []):
+                walk(t['node'])
+
+    for s in starts:
+        walk(s['name'])
+    for n in wf['nodes']:            # anything unreachable, so it is still visible
+        if n['name'] not in seen:
+            order.append(n)
+    return order
+
+
+# ---------------------------------------------------------------- code nodes
+
+SHIM = r'''
+// --- n8n Code-node shim ------------------------------------------------------
+// Deliberately small. The workflows are written to use only these, so that what
+// this harness proves and what n8n runs stay the same thing.
+const __ENV = JSON.parse(process.argv[2]);
+const __ITEMS = JSON.parse(process.argv[3]);
+const __CODE = JSON.parse(process.argv[4]);
+
+const $env = new Proxy({}, { get: (_, k) => __ENV[k] });
+const $now = new Date(__ENV.__NOW__ || Date.now());
+const $today = new Date($now.getFullYear(), $now.getMonth(), $now.getDate());
+let __static = {};
+const $getWorkflowStaticData = () => __static;
+const $input = {
+  all: () => __ITEMS,
+  first: () => __ITEMS[0],
+  last: () => __ITEMS[__ITEMS.length - 1],
+};
+const __logs = [];
+const console = { log: (...a) => __logs.push(a.map(String).join(' ')),
+                  error: (...a) => __logs.push('ERR ' + a.map(String).join(' ')),
+                  warn: (...a) => __logs.push('WARN ' + a.map(String).join(' ')) };
+
+(async () => {
+  try {
+    const fn = new Function('$input', '$env', '$now', '$today',
+                            '$getWorkflowStaticData', 'console',
+                            '"use strict";' + __CODE);
+    let out = await fn($input, $env, $now, $today, $getWorkflowStaticData, console);
+    if (out === undefined) out = [];
+    if (!Array.isArray(out)) out = [out];
+    out = out.map(o => (o && typeof o === 'object' && 'json' in o) ? o : { json: o });
+    process.stdout.write(JSON.stringify({ ok: true, items: out, logs: __logs }));
+  } catch (e) {
+    process.stdout.write(JSON.stringify(
+      { ok: false, error: String(e && e.stack || e), logs: __logs }));
+  }
+})();
+'''
+
+
+def run_code(js, items, env):
+    """Execute a Code node's jsCode inside the n8n container's Node runtime."""
+    os.makedirs(WF, exist_ok=True)
+    with open(DRIVER, 'w') as f:
+        f.write(SHIM)
+    try:
+        r = subprocess.run(
+            ['docker', 'exec', 'n8n', 'node', '/workflows/.wf-preview-run.mjs',
+             json.dumps(env), json.dumps(items), json.dumps(js)],
+            capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return {'ok': False, 'error': 'docker not found on PATH', 'logs': []}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'timed out after 120s', 'logs': []}
+    finally:
+        if os.path.exists(DRIVER):
+            os.remove(DRIVER)
+    if r.returncode != 0 and not r.stdout.strip():
+        return {'ok': False, 'error': (r.stderr or 'no output').strip()[:800],
+                'logs': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'ok': False, 'error': 'unparseable output: ' + r.stdout[:500],
+                'logs': []}
+
+
+# ---------------------------------------------------------------- rendering
+
+def show(label, value, indent=6):
+    pad = ' ' * indent
+    text = value if isinstance(value, str) else json.dumps(value, indent=2)
+    for i, line in enumerate(text.splitlines() or ['']):
+        head = f'{pad}{label}: ' if i == 0 else f'{pad}{" " * len(label)}  '
+        print(head + line)
+
+
+def preview_items(items, limit=3):
+    for it in items[:limit]:
+        body = json.dumps(it.get('json', it), indent=2)
+        for line in body.splitlines():
+            print(f'        {C["dim"]}{line}{C["0"]}')
+    if len(items) > limit:
+        print(f'        {C["dim"]}... {len(items) - limit} more item(s){C["0"]}')
+
+
+def resolve(expr, env, items):
+    """Resolve the small subset of n8n expressions these workflows use in
+    non-Code nodes. Anything else is shown raw and flagged, rather than
+    silently rendered wrong."""
+    if not isinstance(expr, str) or not expr.startswith('='):
+        return expr, False
+    body, unresolved = expr[1:], False
+
+    def sub(m):
+        nonlocal unresolved
+        inner = m.group(1).strip()
+        em = re.fullmatch(r'\$env\.(\w+)', inner)
+        if em:
+            return env.get(em.group(1), '') or f'<{em.group(1)} unset>'
+        jm = re.fullmatch(r'\$json\.([\w.]+)', inner)
+        if jm and items:
+            cur = items[0].get('json', {})
+            for part in jm.group(1).split('.'):
+                cur = cur.get(part, '') if isinstance(cur, dict) else ''
+            return str(cur)
+        unresolved = True
+        return '{{ ' + inner + ' }}'
+
+    return re.sub(r'\{\{(.*?)\}\}', sub, body), unresolved
+
+
+# ---------------------------------------------------------------- the run
+
+SENDERS = {
+    'n8n-nodes-base.httpRequest': 'HTTP',
+    'n8n-nodes-base.emailSend': 'EMAIL',
+    'n8n-nodes-base.googleCalendar': 'GCAL',
+    'n8n-nodes-base.gmail': 'GMAIL',
+    'n8n-nodes-base.discord': 'DISCORD',
+}
+
+
+def run_workflow(path, env, live=False, as_json=False):
+    wf = json.load(open(path))
+    name = os.path.splitext(os.path.basename(path))[0]
+    nodes = node_order(wf)
+    items = [{'json': {}}]
+    record, failed = [], False
+
+    if not as_json:
+        print(f'\n{C["b"]}{name}{C["0"]}  {C["dim"]}{len(nodes)} nodes{C["0"]}')
+        print('─' * 78)
+
+    for n in nodes:
+        ntype, nname = n['type'], n['name']
+        params = n.get('parameters', {})
+        entry = {'node': nname, 'type': ntype}
+
+        if ntype.endswith('scheduleTrigger'):
+            rules = params.get('rule', {}).get('interval', [])
+            crons = [r.get('cronExpression', json.dumps(r)) for r in rules]
+            entry['schedule'] = crons
+            if not as_json:
+                print(f'  {C["c"]}◷ {nname}{C["0"]}')
+                for c in crons:
+                    print(f'      cron: {c}')
+
+        elif ntype.endswith('.code'):
+            js = params.get('jsCode', '')
+            fixture = n.get('__fixture__') or params.get('__fixture__')
+            res = run_code(js, items, env)
+            entry['ok'] = res['ok']
+            if res['ok']:
+                items = res['items']
+                entry['out'] = items
+                if not as_json:
+                    print(f'  {C["g"]}▸ {nname}{C["0"]}  '
+                          f'{C["dim"]}code → {len(items)} item(s){C["0"]}')
+                    for l in res.get('logs', []):
+                        print(f'        {C["y"]}log: {l}{C["0"]}')
+                    preview_items(items)
+            else:
+                failed = True
+                entry['error'] = res['error']
+                if not as_json:
+                    print(f'  {C["r"]}✗ {nname}{C["0"]}  code FAILED')
+                    for l in res['error'].splitlines()[:6]:
+                        print(f'        {C["r"]}{l}{C["0"]}')
+                break
+
+        elif ntype in SENDERS:
+            kind = SENDERS[ntype]
+            url, unres = resolve(params.get('url', ''), env, items)
+            method = params.get('method', 'GET')
+            entry.update({'would_send': kind, 'method': method, 'url': url,
+                          'items': len(items)})
+            if not as_json:
+                print(f'  {C["y"]}⇢ {nname}{C["0"]}  '
+                      f'{C["dim"]}{kind} — NOT SENT, would fire '
+                      f'{len(items)}×{C["0"]}')
+                if url:
+                    show('url', f'{method} {url}')
+                    if unres:
+                        print(f'        {C["y"]}(some expressions left unresolved — '
+                              f'this harness only resolves $env and $json){C["0"]}')
+                body = params.get('jsonBody') or params.get('body')
+                if body:
+                    b, _ = resolve(body, env, items)
+                    show('body', b[:600] + ('…' if len(str(b)) > 600 else ''))
+
+        elif ntype.endswith('.set'):
+            vals = params.get('assignments', {}).get('assignments', [])
+            merged = dict(items[0].get('json', {})) if items else {}
+            for v in vals:
+                rv, _ = resolve(v.get('value'), env, items)
+                merged[v.get('name')] = rv
+            items = [{'json': merged}]
+            entry['out'] = items
+            if not as_json:
+                print(f'  {C["g"]}▸ {nname}{C["0"]}  {C["dim"]}set{C["0"]}')
+                preview_items(items)
+
+        elif ntype.endswith('.noOp') or ntype.endswith('.stickyNote'):
+            continue
+
+        else:
+            entry['skipped'] = 'no simulator for this node type'
+            if not as_json:
+                print(f'  {C["dim"]}· {nname} ({ntype}) — not simulated{C["0"]}')
+
+        record.append(entry)
+
+    if as_json:
+        print(json.dumps({'workflow': name, 'ok': not failed,
+                          'nodes': record}, indent=2))
+    else:
+        print('─' * 78)
+        verdict = (f'{C["r"]}FAILED{C["0"]}' if failed
+                   else f'{C["g"]}logic ran clean{C["0"]}')
+        print(f'  {verdict}  {C["dim"]}— Code nodes were really executed; '
+              f'HTTP/Google/Discord/email were not.{C["0"]}')
+        print(f'  {C["dim"]}A pass here does not prove credentials or n8n wiring. '
+              f'Only a real run does.{C["0"]}\n')
+    return not failed
+
+
+def list_workflows():
+    files = sorted(f for f in os.listdir(WF)
+                   if f.endswith('.json') and not f.startswith('.')) \
+        if os.path.isdir(WF) else []
+    if not files:
+        print(f'\nNo workflows in {WF} yet.\n')
+        return
+    print('\nworkflows\n')
+    for f in files:
+        wf = json.load(open(os.path.join(WF, f)))
+        nodes = wf.get('nodes', [])
+        code = sum(1 for n in nodes if n['type'].endswith('.code'))
+        sends = sum(1 for n in nodes if n['type'] in SENDERS)
+        trig = next((n for n in nodes if 'rigger' in n['type']), None)
+        cron = ''
+        if trig:
+            rules = trig.get('parameters', {}).get('rule', {}).get('interval', [])
+            cron = ', '.join(r.get('cronExpression', '') for r in rules)
+        print(f'  {os.path.splitext(f)[0]:<18} {len(nodes):>2} nodes '
+              f'({code} code, {sends} outbound)   {C["dim"]}{cron}{C["0"]}')
+    print(f'\n  wf-preview <name>     dry run it')
+    print(f'  wf-preview --all      dry run everything\n')
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument('workflow', nargs='?')
+    ap.add_argument('--all', action='store_true')
+    ap.add_argument('--json', action='store_true')
+    ap.add_argument('--live', action='store_true')
+    ap.add_argument('--now', help='override "today" (YYYY-MM-DD) for the dry run')
+    ap.add_argument('-h', '--help', action='store_true')
+    a = ap.parse_args()
+
+    if a.help:
+        print(__doc__)
+        return
+
+    env = load_env()
+    env['__PREVIEW__'] = '1'
+    env['__LIVE__'] = '1' if a.live else ''
+    env['__FIXTURES__'] = '/workflows/../tests/fixtures'
+    if a.now:
+        env['__NOW__'] = a.now + 'T07:00:00Z'
+
+    if not a.workflow and not a.all:
+        list_workflows()
+        return
+
+    names = ([os.path.splitext(f)[0] for f in sorted(os.listdir(WF))
+              if f.endswith('.json') and not f.startswith('.')]
+             if a.all else [a.workflow])
+    ok = True
+    for nm in names:
+        path = os.path.join(WF, nm + '.json')
+        if not os.path.exists(path):
+            sys.exit(f'no workflow {nm!r} in {WF}')
+        ok = run_workflow(path, env, live=a.live, as_json=a.json) and ok
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == '__main__':
+    main()

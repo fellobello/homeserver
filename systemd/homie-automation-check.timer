@@ -1,0 +1,13 @@
+[Unit]
+Description=homie — run the automation check every 6 hours
+
+[Timer]
+# Every 6 hours, offset so it does not collide with the 05:00/05:10/05:30 workflow burst.
+OnCalendar=*-*-* 02,08,14,20:45:00
+# If the box was off when it should have fired, run once on the next boot rather than
+# silently skipping — a check that only runs when convenient is not a check.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""canvas-preview — show exactly what a Canvas iCal feed WOULD sync, changing nothing.
+
+This is Checkpoint 1 of the automation build: prove the feed contains what we need
+BEFORE spending any effort on Google OAuth. It also demonstrates the dedup design, so
+the interesting logic is testable without credentials, a network, or n8n running.
+
+THE DEDUP TRICK, which is the whole reason this workflow needs no local state:
+Google Calendar lets you SPECIFY an event's id on insert. The legal charset is base32hex
+-- lowercase a-v and digits 0-9. A SHA-1 hex digest uses only 0-9 and a-f, a strict
+subset. So sha1("canvas:" + UID) is always a valid Google event id, and the sync becomes
+insert-or-409-then-patch. Run it a hundred times, get one event. A wiped state file
+cannot produce duplicates, because uniqueness lives in Google where the events live.
+
+Usage:
+    bin/canvas-preview                  # uses CANVAS_ICS_URL from .env
+    bin/canvas-preview --file feed.ics  # parse a local file instead
+    bin/canvas-preview --course CSE475  # filter (substring, case/space insensitive)
+    bin/canvas-preview --json           # machine-readable, for piping into n8n
+"""
+import argparse, hashlib, json, os, re, subprocess, sys, datetime
+
+ENV = os.path.expanduser('~/homeserver/.env')
+
+
+def load_env():
+    if not os.path.exists(ENV):
+        return {}
+    out = {}
+    for line in open(ENV):
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            k, v = line.split('=', 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def unfold(text):
+    """RFC 5545 folds long lines at 75 octets with a leading space or tab on the
+    continuation. Parsing without unfolding first silently truncates long SUMMARYs --
+    which is exactly the field we care about."""
+    return re.sub(r'\r?\n[ \t]', '', text)
+
+
+def parse_ics(text):
+    events, cur = [], None
+    for raw in unfold(text).splitlines():
+        if raw == 'BEGIN:VEVENT':
+            cur = {}
+        elif raw == 'END:VEVENT':
+            if cur is not None:
+                events.append(cur)
+            cur = None
+        elif cur is not None and ':' in raw:
+            name, value = raw.split(':', 1)
+            key = name.split(';', 1)[0].upper()
+            params = name.split(';', 1)[1] if ';' in name else ''
+            # ICS escapes commas, semicolons and newlines in TEXT values.
+            value = (value.replace('\\n', '\n').replace('\\,', ',')
+                          .replace('\\;', ';').replace('\\\\', '\\'))
+            if key in ('DTSTART', 'DTEND'):
+                cur[key] = value
+                cur[key + '_PARAMS'] = params
+            else:
+                cur.setdefault(key, value)
+    return events
+
+
+def gcal_id(uid):
+    """sha1 hex is 40 chars of [0-9a-f] -- always inside Google's [0-9a-v] rule."""
+    return hashlib.sha1(('canvas:' + uid).encode()).hexdigest()
+
+
+VALID_GCAL_ID = re.compile(r'^[0-9a-v]{5,1024}$')
+
+
+def fmt_dt(value, params):
+    """Canvas emits UTC (trailing Z) for timed events and VALUE=DATE for all-day.
+    Returning the instant untouched is the point: UTC is unambiguous, and letting
+    Google render it in the target calendar's timezone is what defuses the
+    Arizona-does-not-observe-DST trap after November 1."""
+    if not value:
+        return None, None
+    if 'VALUE=DATE' in params or re.fullmatch(r'\d{8}', value):
+        return value, 'all-day'
+    try:
+        t = datetime.datetime.strptime(value, '%Y%m%dT%H%M%SZ').replace(
+            tzinfo=datetime.timezone.utc)
+        return t.isoformat(), 'utc'
+    except ValueError:
+        return value, 'floating/local — NEEDS REVIEW'
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--file')
+    ap.add_argument('--url')
+    ap.add_argument('--course', action='append', default=[])
+    ap.add_argument('--json', action='store_true')
+    a = ap.parse_args()
+
+    if a.file:
+        text = open(a.file, encoding='utf-8', errors='replace').read()
+        src = a.file
+    else:
+        url = a.url or load_env().get('CANVAS_ICS_URL', '')
+        if not url:
+            sys.exit('no feed: set CANVAS_ICS_URL in ~/homeserver/.env, or pass '
+                     '--file / --url.  Canvas -> Calendar -> "Calendar Feed".')
+        # webcal:// is just https:// wearing a hat
+        url = re.sub(r'^webcal://', 'https://', url)
+        r = subprocess.run(['curl', '-fsSL', '--max-time', '30', url],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f'feed fetch FAILED (curl exit {r.returncode}). '
+                     f'A 404 usually means Canvas rotated the URL -- get a fresh one.')
+        text, src = r.stdout, '<feed>'
+
+    events = parse_ics(text)
+
+    # THE LOAD-BEARING GUARD. An empty or broken feed must never reach a delete pass,
+    # or one bad Canvas response wipes the whole calendar. Fail loudly instead.
+    if not events:
+        sys.exit('ABORT: feed parsed to ZERO events. Refusing to treat that as "every '
+                 'assignment was deleted". Check the feed URL before syncing.')
+
+    rows, bad = [], 0
+    for e in events:
+        uid = e.get('UID', '')
+        start, kind = fmt_dt(e.get('DTSTART'), e.get('DTSTART_PARAMS', ''))
+        eid = gcal_id(uid)
+        if not VALID_GCAL_ID.match(eid):
+            bad += 1
+        rows.append({
+            'uid': uid,
+            'gcal_event_id': eid,
+            'summary': e.get('SUMMARY', '(no title)'),
+            'start': start,
+            'start_kind': kind,
+            'url': e.get('URL', ''),
+        })
+
+    if a.course:
+        def norm(s):
+            return re.sub(r'[^a-z0-9]', '', s.lower())
+        wanted = [norm(c) for c in a.course]
+        rows = [r for r in rows if any(w in norm(r['summary']) for w in wanted)]
+
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    rows.sort(key=lambda r: (r['start'] or ''))
+    print(f'\nsource: {src}')
+    print(f'{len(events)} VEVENT(s) parsed, {len(rows)} shown after filtering\n')
+    print(f'{"WHEN":<26} {"GCAL EVENT ID (sha1)":<42} SUMMARY')
+    print('-' * 110)
+    for r in rows:
+        when = (r['start'] or '?')[:25]
+        flag = '' if r['start_kind'] in ('utc', 'all-day') else '  <-- CHECK TZ'
+        print(f'{when:<26} {r["gcal_event_id"]:<42} {r["summary"][:40]}{flag}')
+
+    ids = [r['gcal_event_id'] for r in rows]
+    print()
+    print(f'  event ids valid for Google Calendar : {len(ids) - bad}/{len(ids)}')
+    print(f'  ids unique (no collisions)          : {len(set(ids))}/{len(ids)}')
+    tz = sum(1 for r in rows if r['start_kind'] not in ('utc', 'all-day'))
+    print(f'  timestamps that are NOT plain UTC   : {tz}'
+          + ('  <-- these need a timezone decision' if tz else '  (good — no DST trap)'))
+    print()
+
+
+if __name__ == '__main__':
+    main()

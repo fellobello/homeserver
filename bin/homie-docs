@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""homie-docs — read the homie documentation in a terminal, over SSH.
+
+Why this exists rather than `apt install w3m`: host packages on this box are a
+deliberate short list (tailscale, rsync), and this needs nothing outside the Python
+standard library. If you would rather have a real text browser, `sudo apt install w3m`
+and `w3m docs/architecture.html` is a perfectly good answer too -- it renders tables
+better than this does.
+
+WHAT IT CANNOT DO: the diagrams are SVG. A terminal cannot draw them, and this strips
+them rather than printing 300 lines of path coordinates. To see those, Caddy serves the
+pages properly on 8446 -- the header above each rendered page says how.
+
+Usage:
+    homie-docs                 list what is available
+    homie-docs arch            render (prefix match -- 'arch' finds architecture)
+    homie-docs manual          the operating manual
+    homie-docs readme          the repo README
+    homie-docs arch --raw      no pager, for piping
+    homie-docs --search vpn    grep every doc at once, with filenames
+"""
+import html, html.parser, os, re, shutil, subprocess, sys, textwrap
+
+REPO = os.path.expanduser('~/homeserver')
+DOCS = os.path.join(REPO, 'docs')
+
+# Blocks whose text is layout or code, never prose.
+DROP = {'script', 'style', 'svg', 'head', 'noscript'}
+BLOCK = {'p', 'div', 'section', 'article', 'header', 'footer', 'ul', 'ol',
+         'table', 'tr', 'blockquote', 'pre', 'hr', 'br', 'figure', 'figcaption'}
+HEAD = {'h1': '=', 'h2': '-', 'h3': '.', 'h4': '.', 'h5': '.', 'h6': '.'}
+SEPARATE = {'span', 'label', 'dt', 'dd', 'small', 'figcaption', 'summary'}
+
+
+class ToText(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip, self.head, self.buf = [], 0, None, []
+        self.in_li = False
+        self.in_pre = False
+        self.cells = []
+        self.in_cell = False
+
+    # -- helpers ---------------------------------------------------------------
+    def flush(self):
+        t = re.sub(r'\s+', ' ', ''.join(self.buf)).strip()
+        self.buf = []
+        return t
+
+    def emit(self, s=''):
+        self.out.append(s)
+
+    # -- tags ------------------------------------------------------------------
+    def handle_starttag(self, tag, attrs):
+        if tag in DROP:
+            self.skip += 1
+            return
+        if self.skip:
+            return
+        if tag == 'pre':
+            # Verbatim: a command block must survive as separate, runnable lines.
+            self.emit(self.flush())
+            self.in_pre = True
+            self.buf = []
+        elif tag in HEAD:
+            self.emit(self.flush())
+            self.head = tag
+            self.buf = []
+        elif tag in ('td', 'th'):
+            self.in_cell = True
+            self.buf = []
+        elif tag == 'tr':
+            self.cells = []
+        elif tag == 'li':
+            self.emit(self.flush())
+            self.in_li = True
+            self.buf = []
+        elif tag in SEPARATE:
+            self.buf.append(' ')
+        elif tag in BLOCK:
+            self.emit(self.flush())
+
+    def handle_endtag(self, tag):
+        if tag in DROP:
+            self.skip = max(0, self.skip - 1)
+            return
+        if self.skip:
+            return
+        if tag == 'pre':
+            raw = ''.join(self.buf).strip('\n')
+            self.buf, self.in_pre = [], False
+            if raw:
+                self.emit('')
+                for ln in raw.split('\n'):
+                    self.emit('    ' + ln.rstrip())
+                self.emit('')
+            return
+        if tag in HEAD and self.head:
+            t = self.flush()
+            if t:
+                self.emit('')
+                self.emit(t)
+                self.emit(HEAD[tag] * min(len(t), 78))
+            self.head = None
+        elif tag in ('td', 'th'):
+            self.cells.append(self.flush())
+            self.in_cell = False
+        elif tag == 'tr':
+            row = [c for c in self.cells if c]
+            if row:
+                self.emit('  | ' + ' | '.join(row))
+            self.cells = []
+        elif tag == 'li':
+            t = self.flush()
+            if t:
+                self.emit('  - ' + t)
+            self.in_li = False
+        elif tag in SEPARATE:
+            self.buf.append(' ')
+        elif tag in BLOCK:
+            t = self.flush()
+            if t:
+                self.emit(t)
+                self.emit('')
+
+    def handle_data(self, d):
+        if not self.skip:
+            self.buf.append(d)
+
+    def close(self):
+        super().close()
+        t = self.flush()
+        if t:
+            self.emit(t)
+
+
+def render_html(path, width):
+    p = ToText()
+    p.feed(open(path, encoding='utf-8', errors='replace').read())
+    p.close()
+    lines, blank = [], 0
+    for raw in p.out:
+        if not raw.strip():
+            blank += 1
+            if blank <= 1:
+                lines.append('')
+            continue
+        blank = 0
+        if re.fullmatch(r'[=\-.]{3,}', raw) or raw.startswith('  '):
+            lines.append(raw)          # underline or table/list row: do not wrap
+        else:
+            lines.extend(textwrap.wrap(raw, width) or [''])
+    return '\n'.join(lines)
+
+
+def catalog():
+    items = {}
+    if os.path.isdir(DOCS):
+        for f in sorted(os.listdir(DOCS)):
+            if f.endswith(('.html', '.md')):
+                items[os.path.splitext(f)[0]] = os.path.join(DOCS, f)
+    items['README'] = os.path.join(REPO, 'README.md')
+    return items
+
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    raw = '--raw' in args
+    args = [a for a in args if a != '--raw']
+    items = catalog()
+
+    if args and args[0] == '--search':
+        term = ' '.join(args[1:])
+        if not term:
+            sys.exit('usage: homie-docs --search <term>')
+        for name, path in items.items():
+            try:
+                for i, line in enumerate(open(path, encoding='utf-8',
+                                              errors='replace'), 1):
+                    if term.lower() in line.lower():
+                        # Strip markup so a hit in an HTML page reads like prose
+                        # rather than like a tag soup with the answer buried in it.
+                        txt = line
+                        if path.endswith('.html'):
+                            txt = re.sub(r'<[^>]+>', ' ', txt)
+                            txt = html.unescape(txt)
+                        txt = re.sub(r'\s+', ' ', txt).strip()
+                        if txt:
+                            print(f'{name}:{i}: {txt[:160]}')
+            except OSError:
+                pass
+        return
+
+    if not args:
+        print('\nhomie documentation\n')
+        for name, path in items.items():
+            kind = 'html' if path.endswith('.html') else ' md '
+            size = os.path.getsize(path) // 1024
+            print(f'  {kind}  {name:<28} {size:>4} KB')
+        print('\n  homie-docs <name>          read it (prefix match)')
+        print('  homie-docs --search <term> grep them all\n')
+        return
+
+    q = args[0].lower().replace('_', '-')
+    hits = [n for n in items if q in n.lower()]
+    if not hits:
+        sys.exit(f'no doc matching {args[0]!r}. Run homie-docs with no arguments.')
+    if len(hits) > 1:
+        exact = [n for n in hits if n.lower() == q]
+        if exact:
+            hits = exact
+        else:
+            sys.exit('ambiguous: ' + ', '.join(hits))
+
+    path = items[hits[0]]
+    width = min(shutil.get_terminal_size((100, 40)).columns - 2, 100)
+    if path.endswith('.html'):
+        text = render_html(path, width)
+        text = (f'{hits[0]}  (rendered from HTML -- diagrams are SVG and were stripped.\n'
+                f'{" " * len(hits[0])}  For those:  ssh -L 8446:localhost:8446 homie-lan\n'
+                f'{" " * len(hits[0])}              then http://localhost:8446)\n'
+                + '=' * width + '\n\n' + text)
+    else:
+        text = open(path, encoding='utf-8', errors='replace').read()
+
+    if raw or not sys.stdout.isatty():
+        print(text)
+        return
+    # -R keeps colour if any, -F quits on a short doc, -X leaves it on screen after.
+    pager = subprocess.Popen(['less', '-RFX'], stdin=subprocess.PIPE)
+    try:
+        pager.communicate(text.encode())
+    except BrokenPipeError:
+        pass
+
+
+if __name__ == '__main__':
+    main()

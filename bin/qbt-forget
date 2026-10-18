@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# qbt-forget — take ONE torrent off qBittorrent's list. Never deletes files.
+#
+#   bin/qbt-forget <info hash>
+#
+# WHY THIS IS A SCRIPT AND NOT A CURL ONE-LINER. qBittorrent's delete call takes
+# deleteFiles=true|false, and a command allowlist rule only matches the START of a
+# command, so a rule allowing the raw curl call would allow deleteFiles=true too.
+# Here false is hardcoded and the only input is a hash checked to be 40 hex
+# characters. That makes an allowlist rule for `bin/qbt-forget` safe: no argument
+# to this script can delete data.
+#
+# Normally not needed: qbt-file removes a torrent itself once its files are filed.
+# This is for when that cleanup fails — it timed out once behind a 30-minute copy.
+
+set -euo pipefail
+
+[ $# -eq 1 ] || { echo "usage: qbt-forget <40-character info hash>" >&2; exit 2; }
+hash=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+[[ "$hash" =~ ^[0-9a-f]{40}$ ]] || { echo "not an info hash: $1" >&2; exit 2; }
+
+QB=http://localhost:8080/api/v2
+# Inside the container: localhost is on qBittorrent's no-login whitelist.
+api() { docker exec qbittorrent curl -s -m 10 "$@"; }
+count_and_name() {
+  api "$QB/torrents/info?hashes=$hash" \
+    | python3 -c 'import sys, json; t = json.load(sys.stdin); print(len(t), t[0]["name"] if t else "")'
+}
+
+read -r n name <<<"$(count_and_name)"
+[ "$n" = 1 ] || { echo "no torrent with hash $hash — nothing to do" >&2; exit 1; }
+
+api -X POST "$QB/torrents/delete" -d "hashes=$hash" -d deleteFiles=false >/dev/null
+
+# Check it actually left the list, rather than trusting the call: qBittorrent answers
+# 200 to a delete even when it did nothing.
+read -r n _ <<<"$(count_and_name)"
+[ "$n" = 0 ] && echo "forgot: $name (files kept)" \
+             || { echo "still listed after delete: $name" >&2; exit 1; }

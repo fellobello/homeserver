@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# homie-check — one command that answers "is everything actually fine?"
+#
+# Implements the standard check recipe plus Jellyfin-specific checks.
+# Safe to run any time; makes no changes.
+
+CFG="$HOME/homeserver/config/jellyfin/config/config"
+LAN_IP=192.168.1.10
+TS_IP=100.64.0.10
+pass=0; fail=0
+ok(){ printf '  \033[32m✓\033[0m %s\n' "$1"; pass=$((pass+1)); }
+no(){ printf '  \033[31m✗\033[0m %s\n' "$1"; fail=$((fail+1)); }
+info(){ printf '    %s\n' "$1"; }
+
+echo
+echo "CONTAINERS"
+for c in jellyfin caddy syncthing qbittorrent n8n ollama; do
+  s=$(docker inspect "$c" --format '{{.State.Status}}' 2>/dev/null) || { no "$c: not found"; continue; }
+  h=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' 2>/dev/null)
+  [ "$s" = running ] && ok "$c: $s (health: $h)" || no "$c: $s"
+done
+
+echo
+echo "PORT EXPOSURE  (Docker bypasses ufw — always verify directly)"
+chk(){ # name port expect_lan
+  local name=$1 port=$2 expect=$3
+  local lan; lan=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "http://$LAN_IP:$port/" 2>/dev/null)
+  if [ "$expect" = open ]; then
+    [ "$lan" != 000 ] && ok "$name ($port) reachable on LAN — intended" || no "$name ($port) NOT on LAN but should be"
+  else
+    [ "$lan" = 000 ] && ok "$name ($port) not on LAN — intended" || no "$name ($port) EXPOSED on LAN (got HTTP $lan)"
+  fi
+}
+chk "Jellyfin" 8096 open
+chk "Syncthing" 8384 closed
+chk "qBittorrent" 8080 closed
+chk "qBittorrent via Caddy" 8444 closed
+# Step 13. n8n publishes NO host port at all, so 5678 must be absent from the host
+# entirely; only Caddy's 8445 exists, and only on the tailnet.
+chk "n8n via Caddy" 8445 closed
+chk "docs server" 8446 closed
+# 8446 is the one port deliberately bound to 127.0.0.1 rather than the tailnet, so it
+# must be absent from the tailnet address too -- a plain-HTTP site reachable on the
+# tailnet would be a real downgrade from every other route here.
+if curl -s -o /dev/null --max-time 4 "http://${TS_IP}:8446/" 2>/dev/null; then
+  no "docs server (8446) is reachable on the TAILNET — it must be localhost only"
+else
+  ok "docs server (8446) not on the tailnet either — localhost only, as intended"
+fi
+if ss -lnt 2>/dev/null | grep -qE '[^0-9]5678\b'; then
+  no "n8n port 5678 is bound on the host — it should publish nothing"
+else
+  ok "n8n publishes no host port — reached only as n8n:5678 by Caddy"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://homie.tailnet-name.ts.net/health")
+[ "$code" = 200 ] && ok "Caddy HTTPS (tailnet) -> Jellyfin: $code" || no "Caddy HTTPS -> Jellyfin: $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://homie.tailnet-name.ts.net:8444/")
+[ "$code" = 200 ] && ok "Caddy HTTPS (tailnet) -> qBittorrent: $code" || no "Caddy HTTPS -> qBittorrent: $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://homie.tailnet-name.ts.net:8445/")
+[ "$code" = 200 ] && ok "Caddy HTTPS (tailnet) -> n8n: $code" || no "Caddy HTTPS -> n8n: $code"
+
+echo
+echo "MEMORY LIMITS  (Step 13 — a runaway container must not be able to OOM Jellyfin)"
+for c in jellyfin qbittorrent syncthing gluetun caddy n8n ollama; do
+  id=$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null) || { no "$c: not found"; continue; }
+  lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$c" 2>/dev/null)
+  if [ "${lim:-0}" -gt 0 ]; then
+    cur=$(cat "/sys/fs/cgroup/system.slice/docker-$id.scope/memory.current" 2>/dev/null || echo 0)
+    ok "$c capped at $((lim/1048576)) MiB (using $((cur/1048576)) MiB)"
+  else
+    no "$c has NO memory limit — it can take the whole box down"
+  fi
+done
+
+echo
+echo "DOWNLOADER"
+QB=http://127.0.0.1:8080
+QBCONF="$HOME/homeserver/config/qbittorrent/qBittorrent/qBittorrent.conf"
+
+# 1. Not sitting on default / temporary credentials.
+#    A password IS set (the linuxserver image prints a temporary one to 'docker logs'
+#    until this key exists), and the well-known default does not work.
+if grep -q '^WebUI.Password_PBKDF2=' "$QBCONF" 2>/dev/null; then
+  ok "WebUI password is set (not the image's temporary one)"
+else
+  no "WebUI has NO password set — it is printing a temp password to 'docker logs qbittorrent'"
+fi
+# THE admin/adminadmin PROBE WAS DELETED 2026-09-21, because it never worked. It
+# POSTed with 'Referer: http://localhost:8080' while connecting to 127.0.0.1:8080, so
+# qBittorrent rejected it on the CSRF referer/origin check BEFORE ever looking at the
+# credentials, and answered a bare 'Unauthorized'. The test compared that to "Ok." and
+# happily reported "default credentials rejected" — which it would have reported just
+# the same if the password HAD been adminadmin. A check that cannot fail is worse than
+# no check: it spends your trust without earning it.
+#
+# It is also now testing the wrong thing. The WebUI deliberately takes no login from
+# the tailnet (see the Caddyfile note on 8444). What actually holds the line is the
+# two properties below, so assert those: the bypass is scoped to named subnets rather
+# than universal, and the port is on the tailnet address only — which PORT EXPOSURE
+# above already proves by checking it is absent from the LAN.
+prefs=$(docker exec qbittorrent curl -s -m 4 "$QB/api/v2/app/preferences" 2>/dev/null)
+read -r bypass nets fails ban <<<"$(printf '%s' "$prefs" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print(d["bypass_auth_subnet_whitelist_enabled"],
+      ",".join(d["bypass_auth_subnet_whitelist"].split()) or "-",
+      d["web_ui_max_auth_fail_count"], d["web_ui_ban_duration"])' 2>/dev/null)"
+if [ "$bypass" = "True" ] && [ "${nets#*100.64.0.0/10}" != "$nets" ]; then
+  ok "WebUI takes no login from the tailnet, by design ($nets)"
+elif [ "$bypass" = "True" ]; then
+  no "auth bypass is on but does not name the tailnet range: $nets"
+else
+  no "auth bypass is off (got '$bypass') — the WebUI will prompt for a login"
+fi
+# 2026-09-21: five bad guesses through Caddy banned the PROXY and locked every device
+# off 8444 at once. Both numbers below are what stop that recurring.
+if [ "${fails:-0}" -ge 1000 ] && [ "${ban:-9999}" -le 60 ]; then
+  ok "brute-force lockout defanged (${fails} failures, ${ban}s ban)"
+else
+  no "lockout can trigger again: ${fails:-?} failures -> ${ban:-?}s ban"
+fi
+
+# 2. The T7 is ONE bind at /mnt/t7, backups are read-only inside it, and qBittorrent
+#    saves under it. One bind is what makes the hook's move a rename (see 2b); the
+#    read-only backups bind is also what stops the container starting with the T7
+#    unplugged, because /mnt/t7 alone exists as an empty dir on the root disk.
+mounts=$(docker inspect qbittorrent --format '{{range .Mounts}}{{.Source}}->{{.Destination}}:{{.RW}} {{end}}' 2>/dev/null)
+case " $mounts" in *" /mnt/t7->/mnt/t7:true "*) ok "T7 bound once, read-write, at /mnt/t7" ;;
+                   *) no "T7 is not bound at /mnt/t7 — downloads may be filling the root disk" ;; esac
+case " $mounts" in *" /mnt/t7/backups->/mnt/t7/backups:false "*) ok "backups read-only inside qBittorrent (and the unplugged-T7 guard is in place)" ;;
+                   *) no "backups bind missing or writable — qBittorrent could damage backups, and would start with the T7 unplugged" ;; esac
+sp=$(printf '%s' "$prefs" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["save_path"], d["temp_path"])' 2>/dev/null)
+case "$sp" in "/mnt/t7/downloads/"*" /mnt/t7/downloads/"*) ok "qBittorrent saves under /mnt/t7/downloads" ;;
+              *) no "qBittorrent save/temp path is not under /mnt/t7/downloads: ${sp:-unreadable}" ;; esac
+# 2b. The move qbt-file makes is a real rename, not a silent copy. Tested for real:
+#     rename(2) fails with EXDEV across mount points even on one filesystem, and
+#     shutil.move then byte-copies without a word — a 30-minute "move" per episode.
+rn=$(docker exec qbittorrent python3 -c '
+import os
+a, b = "/mnt/t7/downloads/.homie-rename-test", "/mnt/t7/TV/.homie-rename-test"
+open(a, "w").close()
+try:
+    os.rename(a, b); os.remove(b); print("ok")
+except OSError as e:
+    os.remove(a); print(e.strerror)' 2>&1)
+[ "$rn" = "ok" ] && ok "downloads -> library is an instant rename" \
+                 || no "downloads -> library is NOT a rename (${rn}) — every import is a full copy"
+dl_free=$(df --output=avail -BG /mnt/t7 2>/dev/null | tail -1 | tr -dc 0-9)
+[ "${dl_free:-0}" -gt 40 ] && ok "T7 headroom for downloads: ${dl_free}G" \
+                           || no "T7 low on space (${dl_free}G) — imports byte-copy on exFAT, so headroom matters"
+
+# 3. Ownership. exFAT fixes uid/gid at mount time; anything not 1000:1000 means the
+#    file landed somewhere OTHER than the T7 and Jellyfin will not be able to read it.
+bad=$(find /mnt/t7/downloads -mindepth 1 ! -user 1000 -o -mindepth 1 ! -group 1000 2>/dev/null | head -3)
+[ -z "$bad" ] && ok "everything under /mnt/t7/downloads is uid/gid 1000" \
+              || { no "wrong ownership under /mnt/t7/downloads"; info "$(echo "$bad" | head -1)"; }
+
+# 4. The filing hook: enabled, pointed at the script, and the script is executable.
+#    Without this a download completes and just sits in downloads/ forever.
+# Keys live as bare 'enabled='/'program=' inside an [AutoRun] SECTION, not as
+# 'AutoRun\enabled=' like most other qBittorrent settings — so read the section.
+hook=$(docker exec qbittorrent sh -c 'sed -n "/\[AutoRun\]/,/^\[/p" /config/qBittorrent/qBittorrent.conf | grep -c "^enabled=true"' 2>/dev/null)
+[ "${hook:-0}" -ge 1 ] && ok "filing hook enabled (Run on torrent finished)" \
+                       || no "filing hook NOT enabled — downloads will not be filed"
+if docker exec qbittorrent test -x /hooks/qbt-file 2>/dev/null; then
+  ok "hook script present and executable at /hooks/qbt-file"
+else
+  no "hook script missing or not executable — check the ./hooks bind"
+fi
+nshows=$(grep -cE '^[^#|]+\|' "$HOME/homeserver/hooks/series-map.conf" 2>/dev/null)
+[ "${nshows:-0}" -gt 0 ] && ok "series-map.conf lists $nshows show(s)" \
+                         || no "series-map.conf unreadable or empty — every TV import will refuse"
+# 4b. What the containers read is what the repo holds. A single-file bind pins an inode,
+#     so a git pull or atomic editor save once left the live hook on stale code with no
+#     error anywhere. The binds are folders now; this proves it stays that way.
+drift=""
+for pair in qbittorrent:hooks/qbt-file:/hooks/qbt-file \
+            qbittorrent:hooks/series-map.conf:/hooks/series-map.conf \
+            caddy:caddy/Caddyfile:/etc/caddy/Caddyfile; do
+  IFS=: read -r c src dst <<<"$pair"
+  [ "$(md5sum < "$HOME/homeserver/$src" | cut -d' ' -f1)" = \
+    "$(docker exec "$c" md5sum "$dst" 2>/dev/null | cut -d' ' -f1)" ] || drift="$drift $src"
+done
+[ -z "$drift" ] && ok "containers read the repo's current hooks and Caddyfile" \
+                || no "container copy differs from the repo:$drift — recreate that container"
+
+# 5. VPN tunnel — BUILT 2026-09-02 (Step 12). Gluetun + NordVPN WireGuard.
+#    qBittorrent shares gluetun's network namespace, so its only route out is tun0.
+#    This check armed itself the moment the gluetun container appeared, exactly as
+#    intended when it was written dormant.
+if docker inspect gluetun >/dev/null 2>&1; then
+  host_ip=$(curl -s -m 6 https://api.ipify.org)
+  qb_ip=$(docker exec qbittorrent curl -s -m 6 https://api.ipify.org 2>/dev/null)
+  if [ -z "$qb_ip" ]; then
+    # No answer is NOT a leak — it is the kill switch holding with the tunnel down, or
+    # qBittorrent sitting in a dead namespace after gluetun was recreated without it
+    # (fix: docker compose up -d --force-recreate qbittorrent). Reporting this as a leak
+    # is worse than useless: it points at the wrong problem. Observed 2026-09-02.
+    no "qBittorrent has NO egress — tunnel down, or it needs recreating after a gluetun restart"
+  elif [ "$qb_ip" != "$host_ip" ]; then
+    ok "qBittorrent egress is the VPN ($qb_ip), not the home IP"
+  else
+    no "LEAK: qBittorrent egress IP ($qb_ip) matches the home IP — kill switch is not working"
+  fi
+else
+  info "no VPN: torrent traffic uses the home IP by choice (Gluetun deferred)"
+fi
+
+echo
+echo "JELLYFIN CONFIG"
+g(){ grep -o "<$1>[^<]*</$1>" "$2" 2>/dev/null | sed "s|</\?$1>||g"; }
+hw=$(g HardwareAccelerationType "$CFG/encoding.xml")
+[ "$hw" = vaapi ] && ok "hardware acceleration: $hw" || no "hardware acceleration: ${hw:-unset} (expected vaapi)"
+th=$(g EnableThrottling "$CFG/encoding.xml")
+[ "$th" = true ] && ok "transcode throttling: on" || no "transcode throttling: ${th:-unset}"
+grep -q '<string>172.18' "$CFG/network.xml" && ok "known proxies set (real client IPs in logs)" || no "known proxies not set"
+
+echo
+echo "LIBRARY"
+db="$HOME/homeserver/config/jellyfin/config/data/jellyfin.db"
+n=$(python3 - "$db" <<'PY' 2>/dev/null
+import sqlite3,sys
+c=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True)
+print(c.execute("select count(*) from BaseItems where Path like '/media/%'").fetchone()[0])
+PY
+)
+[ "${n:-0}" -gt 0 ] && ok "$n items indexed" || no "0 items indexed — run Dashboard -> Scan All Libraries"
+if mountpoint -q /mnt/t7; then
+  ok "T7 mounted at /mnt/t7 ($(df -h /mnt/t7 | awk 'NR==2{print $4}') free)"
+  info "on disk: $(find /mnt/t7/Movies /mnt/t7/TV -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.avi' \) 2>/dev/null | wc -l) video files, $(du -sh /mnt/t7/Movies /mnt/t7/TV 2>/dev/null | awk '{s=$1} END{print s}') in TV"
+else
+  no "T7 NOT mounted — Jellyfin cannot see any media (check the USB cable, then: sudo mount -a)"
+fi
+
+echo
+echo "LIVE TRANSCODE  (start playback, then re-run this)"
+cmd=$(docker exec jellyfin bash -c 'for p in /proc/[0-9]*/cmdline; do tr "\0" " " < "$p" 2>/dev/null; echo; done | grep "^/usr/lib/jellyfin-ffmpeg/ffmpeg"' 2>/dev/null | head -1)
+if [ -z "$cmd" ]; then
+  info "nothing transcoding right now (direct play, or nothing is playing)"
+else
+  if grep -q 'vaapi' <<<"$cmd"; then ok "transcoding on the GPU (VAAPI)"; else no "transcoding on the CPU — hardware accel not being used!"; fi
+  info "$(grep -o '\-c:v [a-z0-9_]*' <<<"$cmd" | head -1)  $(grep -o '\-hwaccel [a-z]*' <<<"$cmd" | head -1)"
+fi
+
+echo
+echo "DISK"
+df -h / | awk 'NR==2{printf "  %s used of %s (%s full), %s free\n",$3,$2,$5,$4}'
+avail=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+[ "$avail" -gt 15 ] && ok "headroom ok" || no "low disk — under 15 GB free"
+
+echo
+printf "  %d passed, %d failed\n\n" "$pass" "$fail"
+[ "$fail" -eq 0 ]

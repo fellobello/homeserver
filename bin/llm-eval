@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# llm-eval — score the LLM on a classification job. KEPT AS A HARNESS, NOT A LIVE TEST.
+#
+# ⚠ ORPHANED 2026-09-21. This scored `discord-watch`, which was dropped — Steven has no
+# class Discord servers, so it had no input and never would. The 12 cases below were
+# INVENTED, sentence by sentence, precisely because there was no real data to draw on.
+# That was the tell nobody read. Do not treat 11/12 as evidence the system works; it
+# measures a job nothing will ever do.
+#
+# WHAT IS STILL WORTH KEEPING: the harness. The docker-cp-into-n8n path, the scoring
+# loop, and the discipline of running it before and after any prompt or model change.
+# The job itself survived: Canvas notification emails carry the same four categories,
+# so the next eval is built from those (tests/fixtures/real/canvas-emails.json).
+#
+# WHY THIS EXISTS. The eval set IS the engineering. A model swap, a prompt edit, or a
+# quantisation change all look identical from the outside; this is the only thing that
+# says whether they made it better or worse. Run it before and after any such change.
+#
+# Measured 2026-09-19 on qwen2.5:3b-instruct-q4_K_M, CPU only, i5-7300U: 11/12 (92%),
+# 45s wall clock for 12 messages. The FIRST attempt at this prompt scored 3/5 — the fix
+# was the category definitions and the two disambiguation rules, not a bigger model.
+# Keep that in mind before concluding the hardware is the problem.
+#
+# Runs inside the n8n container, which is also the only thing that can reach ollama
+# (neither publishes a host port). So a pass here proves the real integration path.
+#
+# Usage:  bin/llm-eval            # uses LLM_* from .env
+#         LLM_MODEL=llama3.2:3b bin/llm-eval
+set -euo pipefail
+REPO="$HOME/homeserver"
+# shellcheck disable=SC1091
+set -a; . "$REPO/.env"; set +a
+TMP=$(mktemp /tmp/llm-eval.XXXXXX.mjs)
+trap 'rm -f "$TMP"' EXIT
+cat > "$TMP" <<'JS'
+const BASE = process.env.LLM_BASE_URL || 'http://ollama:11434';
+const MODEL = process.env.LLM_MODEL;
+
+const CASES = [
+  ['Reminder: Midterm 2 is Thursday Oct 8 in Room 174, bring a pencil and your ASU ID.', 'exam'],
+  ['Final exam schedule posted — ours is Dec 11 at 7:30am. Brutal.', 'exam'],
+  ['Quiz 5 opens Friday and closes Sunday night, 2 attempts allowed.', 'exam'],
+  ['The project 3 deadline has been pushed to Sunday 11:59pm', 'deadline'],
+  ['HW6 is due tonight at midnight, dont forget the writeup', 'deadline'],
+  ['Sprint 4 retro doc needs to be submitted by Friday', 'deadline'],
+  ['Office hours moved to Zoom this week, link is on Canvas', 'logistics'],
+  ['Prof said lecture is cancelled Monday for the holiday', 'logistics'],
+  ['Groups for the final project are posted on the Canvas page', 'logistics'],
+  ['yo did anyone else find hw4 impossible', 'noise'],
+  ['lmaooo', 'noise'],
+  ['anyone wanna grab food after class', 'noise'],
+];
+
+const SYSTEM = `You classify messages from a university class Discord server.
+
+Categories, in priority order. Pick the FIRST that applies:
+- exam: announces or discusses the scheduling, location, format, or content coverage of a graded EXAM, midterm, final, or quiz.
+- deadline: states a due date or a change to a due date for an ASSIGNMENT, homework, project, lab, or submission. Not exams.
+- logistics: course operations — cancelled or moved lectures, office hours, room changes, posted resources, group assignments, tooling.
+- noise: student chatter, jokes, venting, complaints, social plans, questions with no announcement content.
+
+Rules:
+- A student COMPLAINING about homework is noise, not deadline. Only an actual due date or change to one is deadline.
+- A student ASKING when something is due is noise. Only a statement of the date counts.
+- If it announces an exam AND its date, it is exam, not deadline.
+
+Reply with ONLY a JSON array, one object per input line, no prose:
+[{"id":1,"category":"exam","confidence":0.9}]`;
+
+async function run(cases) {
+  const user = cases.map((c, i) => `${i + 1}: ${c[0]}`).join('\n');
+  const t0 = Date.now();
+  const r = await fetch(`${BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL, stream: false, temperature: 0,
+      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }],
+    }),
+  });
+  const j = await r.json();
+  const ms = Date.now() - t0;
+  const txt = j.choices?.[0]?.message?.content ?? '';
+  return { ms, txt, usage: j.usage };
+}
+
+const { ms, txt, usage } = await run(CASES);
+console.log('--- raw output ---');
+console.log(txt.trim());
+
+let got;
+try {
+  got = JSON.parse(txt.trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim());
+} catch (e) {
+  console.log('\n!! OUTPUT WAS NOT PARSEABLE JSON:', e.message);
+  process.exit(0);
+}
+
+let right = 0;
+console.log('\n--- scored ---');
+for (let i = 0; i < CASES.length; i++) {
+  const want = CASES[i][1];
+  const g = Array.isArray(got[i]) ? got[i][1] : got[i]?.category;
+  const hit = g === want;
+  if (hit) right++;
+  console.log(`${hit ? ' OK ' : 'MISS'}  want=${want.padEnd(9)} got=${String(g).padEnd(9)}  ${CASES[i][0].slice(0, 52)}`);
+}
+console.log(`\naccuracy: ${right}/${CASES.length} (${Math.round(right / CASES.length * 100)}%)`);
+console.log(`wall clock: ${(ms / 1000).toFixed(1)}s   tokens: ${JSON.stringify(usage)}`);
+JS
+docker cp "$TMP" n8n:/tmp/llm-eval.mjs >/dev/null
+docker exec -e LLM_BASE_URL="${LLM_BASE_URL}" -e LLM_MODEL="${LLM_MODEL}" \
+            -e LLM_API_KEY="${LLM_API_KEY:-}" n8n node /tmp/llm-eval.mjs

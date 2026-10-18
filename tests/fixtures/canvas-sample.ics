@@ -1,0 +1,33 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Instructure//Canvas//EN
+BEGIN:VEVENT
+DTSTAMP:20260919T060000Z
+UID:event-assignment-11223344@asu.instructure.com
+DTSTART:20260925T065900Z
+DTEND:20260925T065900Z
+SUMMARY:HW6 - Backpropagation [CSE 475 - Foundations of Machine Learning]
+URL:https://asu.instructure.com/courses/101/assignments/11223344
+END:VEVENT
+BEGIN:VEVENT
+DTSTAMP:20260919T060000Z
+UID:event-assignment-55667788@asu.instructure.com
+DTSTART:20261009T065900Z
+SUMMARY:Project 3 - Distributed Chat Service with a deliberately long title that C
+ anvas will fold across lines [CSE 445 - Distributed Software Development]
+URL:https://asu.instructure.com/courses/102/assignments/55667788
+END:VEVENT
+BEGIN:VEVENT
+DTSTAMP:20260919T060000Z
+UID:event-calendar-event-99001122@asu.instructure.com
+DTSTART;VALUE=DATE:20261012
+DTEND;VALUE=DATE:20261013
+SUMMARY:Fall Break - No Classes [CSE 460 - Software Analysis and Design]
+END:VEVENT
+BEGIN:VEVENT
+DTSTAMP:20260919T060000Z
+UID:event-assignment-44556677@asu.instructure.com
+DTSTART;TZID=America/Phoenix:20261120T235900
+SUMMARY:Capstone Sprint 4 Demo [CSE 486 - Capstone II]
+END:VEVENT
+END:VCALENDAR

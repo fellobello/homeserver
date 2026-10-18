@@ -1,0 +1,19 @@
+# The dead man's switch for the n8n automations (Step 13).
+# Install:  sudo cp systemd/homie-automation-check.* /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now homie-automation-check.timer
+[Unit]
+Description=homie — check the n8n automation stack is alive and workflows are fresh
+Documentation=file:/home/admin/homeserver/README.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=admin
+Group=admin
+# --quiet so a healthy run writes nothing to the journal; failures still print.
+ExecStart=/home/admin/homeserver/bin/homie-automation-check --quiet
+# The script exits 1 on a real problem. That is information, not a crash, and systemd
+# marking the unit failed is exactly how it surfaces in `systemctl list-timers`.
+SuccessExitStatus=0

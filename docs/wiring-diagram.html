@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>homie — wiring diagram</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="homie.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="nav">
+  <a class="nav-home" href="index.html">homie docs</a>
+  <a href="operating-manual.html">Operating manual</a>
+  <a href="architecture.html">Architecture</a>
+  <a href="networking.html">Networking</a>
+  <a href="wiring-diagram.html" aria-current="page">Wiring diagram</a>
+</nav>
+
+<header class="masthead">
+  <div class="eyebrow">The whole machine, drawn</div>
+  <h1>Wiring diagram</h1>
+  <p class="standfirst">
+    Every component, every connection between them, and the two separate doors traffic
+    arrives through — with each arrow labelled so it says what it actually carries.
+  </p>
+  <div class="facts">
+    <div><div class="lbl"><span style="color:var(--tailnet)">■</span> Blue</div><div class="val">over the tunnel · me only</div></div>
+    <div><div class="lbl"><span style="color:var(--lan)">■</span> Amber</div><div class="val">house WiFi · roommates</div></div>
+    <div><div class="lbl"><span style="color:var(--disk)">■</span> Green</div><div class="val">disk and storage</div></div>
+  </div>
+</header>
+
+<section id="system">
+  <div class="sec-head"><span class="sec-num">01</span><h2>The system</h2></div>
+  <p>
+    Follow any arrow from top to bottom and you have a complete request. Container
+    addresses are deliberately absent: Docker assigns them in start order and they change
+    whenever the stack is recreated.
+  </p>
+
+  <figure>
+    <div class="figwrap">
+    <svg class="diagram" viewBox="0 0 1000 910" role="img"
+         aria-label="System diagram of the homie home server. Two client groups arrive on two separate network interfaces. My own laptop and phone arrive over an encrypted tunnel on the tailscale0 interface and can reach sshd on port 22 and Caddy on ports 443, 8443, 8444 and 8445. Caddy forwards over a private Docker network to Syncthing, n8n and Jellyfin, and to gluetun on port 8080 for the qBittorrent control panel. n8n calls ollama for local language model inference. Roommates and the TV arrive over the wlp4s0 house WiFi interface and reach only Jellyfin on port 8096, never passing through Caddy. qBittorrent has no network interface of its own; it shares gluetun's network namespace, whose only route out is a WireGuard tunnel to a NordVPN exit server, so the address peers record is the VPN's and never the home connection. On disk, sshd and Syncthing both read and write the school-work folder on the internal disk, Jellyfin reads the Movies and TV folders read-only, qBittorrent writes to downloads and files finished media into those same folders, and a nightly timer mirrors school-work into the backups folder. Movies, TV, downloads and backups all sit on one external SSD mounted at slash mnt slash t7, so the library and its backup share a single physical drive.">
+
+      <defs>
+        <marker id="w-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+        <marker id="w-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--tailnet)"/></marker>
+        <marker id="w-l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--lan)"/></marker>
+        <marker id="w-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--disk)"/></marker>
+      </defs>
+
+      <!-- ============ clients ============ -->
+      <rect class="d-box d-box-t" x="70" y="20" width="300" height="62" rx="7"/>
+      <text class="d-name" x="220" y="45" text-anchor="middle">My laptop &amp; phone</text>
+      <text class="d-sub"  x="220" y="65" text-anchor="middle">any network, anywhere</text>
+
+      <rect class="d-box d-box-l" x="630" y="20" width="300" height="62" rx="7"/>
+      <text class="d-name" x="780" y="45" text-anchor="middle">Roommates &amp; the TV</text>
+      <text class="d-sub"  x="780" y="65" text-anchor="middle">in the house only</text>
+
+      <path class="d-line d-line-t" d="M220 82 V 132" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="232" y="112">encrypted tunnel</text>
+
+      <path class="d-line d-line-l" d="M780 82 V 132" marker-end="url(#w-l)"/>
+      <text class="d-edge d-edge-l" x="792" y="112">house wifi</text>
+
+      <!-- ============ interfaces ============ -->
+      <rect class="d-box d-box-t" x="70" y="138" width="300" height="56" rx="7"/>
+      <text class="d-name" x="220" y="162" text-anchor="middle">tailscale0</text>
+      <text class="d-sub"  x="220" y="181" text-anchor="middle">100.64.0.10</text>
+
+      <rect class="d-box d-box-l" x="630" y="138" width="300" height="56" rx="7"/>
+      <text class="d-name" x="780" y="162" text-anchor="middle">wlp4s0</text>
+      <text class="d-sub"  x="780" y="181" text-anchor="middle">192.168.1.10</text>
+
+      <!-- ============ homie enclosure ============ -->
+      <rect class="d-zone" x="36" y="246" width="928" height="560" rx="12"/>
+      <text class="d-zonelbl" x="54" y="268">homie — thinkpad t470</text>
+
+      <!-- ---- host row ---- -->
+      <rect class="d-box" x="64" y="296" width="150" height="60" rx="7"/>
+      <text class="d-name" x="139" y="321" text-anchor="middle">sshd</text>
+      <text class="d-sub"  x="139" y="340" text-anchor="middle">on the host</text>
+
+      <rect class="d-box d-box-t" x="250" y="296" width="420" height="60" rx="7"/>
+      <text class="d-name" x="460" y="320" text-anchor="middle">Caddy — real HTTPS</text>
+      <text class="d-sub"  x="460" y="339" text-anchor="middle">:443 · :8443 · :8444 · :8445 tailnet   ·   :8446 docs, localhost</text>
+
+      <path class="d-line d-line-t" d="M120 194 V 290" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="130" y="248">:22</text>
+
+      <path class="d-line d-line-t" d="M330 194 V 290" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="340" y="248">:443 · :8443 · :8444 · :8445</text>
+
+      <!-- LAN straight to Jellyfin, bypassing Caddy -->
+      <path class="d-line d-line-l" d="M810 194 V 412" marker-end="url(#w-l)"/>
+      <text class="d-edge d-edge-l" x="822" y="290">:8096 — direct,</text>
+      <text class="d-edge d-edge-l" x="822" y="304">no proxy, plain HTTP</text>
+
+      <!-- ---- container row ---- -->
+      <rect class="d-box d-box-t" x="64" y="418" width="166" height="62" rx="7"/>
+      <text class="d-name" x="147" y="443" text-anchor="middle">Syncthing</text>
+      <text class="d-sub"  x="147" y="462" text-anchor="middle">:8384 admin</text>
+
+      <rect class="d-box d-box-t" x="256" y="418" width="150" height="62" rx="7"/>
+      <text class="d-name" x="331" y="443" text-anchor="middle">n8n</text>
+      <text class="d-sub"  x="331" y="462" text-anchor="middle">no host port</text>
+
+      <rect class="d-box" x="432" y="418" width="150" height="62" rx="7"/>
+      <text class="d-name" x="507" y="443" text-anchor="middle">ollama</text>
+      <text class="d-sub"  x="507" y="462" text-anchor="middle">no host port</text>
+
+      <rect class="d-box d-box-l" x="700" y="418" width="220" height="62" rx="7"/>
+      <text class="d-name" x="810" y="443" text-anchor="middle">Jellyfin</text>
+      <text class="d-sub"  x="810" y="462" text-anchor="middle">:8096 — the only shared door</text>
+
+      <path class="d-line d-line-t" d="M290 356 V 386 H 147 V 412" marker-end="url(#w-t)"/>
+      <path class="d-line d-line-t" d="M331 356 V 412" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="340" y="382">plain HTTP, private network</text>
+
+      <path class="d-line d-line-t" d="M655 356 V 386 H 790 V 412" marker-end="url(#w-t)"/>
+
+      <path class="d-line" d="M406 449 H 426" marker-end="url(#w-a)"/>
+
+      <!-- ---- VPN namespace ---- -->
+      <rect class="d-zone" x="250" y="524" width="360" height="102" rx="10"/>
+      <text class="d-zonelbl" x="262" y="516">one shared network namespace</text>
+
+      <rect class="d-box d-box-t" x="270" y="548" width="150" height="56" rx="7"/>
+      <text class="d-name" x="345" y="572" text-anchor="middle">gluetun</text>
+      <text class="d-sub"  x="345" y="591" text-anchor="middle">holds the tunnel</text>
+
+      <rect class="d-box d-box-t" x="440" y="548" width="150" height="56" rx="7"/>
+      <text class="d-name" x="515" y="572" text-anchor="middle">qBittorrent</text>
+      <text class="d-sub"  x="515" y="591" text-anchor="middle">no interface</text>
+
+      <path class="d-line d-line-t" d="M610 356 V 508 H 345 V 542" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="360" y="502">:8444 → gluetun:8080</text>
+
+      <!-- tunnel out, leaving the machine -->
+      <path class="d-line d-line-t" d="M610 566 H 875 V 836" marker-end="url(#w-t)"/>
+      <text class="d-edge d-edge-t" x="624" y="558">tun0 · WireGuard — the only way out</text>
+
+      <rect class="d-box d-box-t" x="790" y="838" width="170" height="56" rx="7"/>
+      <text class="d-name" x="875" y="862" text-anchor="middle">NordVPN exit</text>
+      <text class="d-sub"  x="875" y="881" text-anchor="middle">what the swarm sees</text>
+
+      <!-- ---- disk row ---- -->
+      <rect class="d-box d-box-d" x="64" y="674" width="190" height="58" rx="7"/>
+      <text class="d-name" x="159" y="698" text-anchor="middle">school-work</text>
+      <text class="d-sub"  x="159" y="717" text-anchor="middle">internal disk</text>
+
+      <rect class="d-zone" x="270" y="656" width="574" height="92" rx="10"/>
+      <text class="d-zonelbl" x="282" y="648">/mnt/t7 — one physical drive</text>
+
+      <rect class="d-box d-box-d" x="286" y="674" width="170" height="58" rx="7"/>
+      <text class="d-name" x="371" y="698" text-anchor="middle">Movies · TV</text>
+      <text class="d-sub"  x="371" y="717" text-anchor="middle">the library</text>
+
+      <rect class="d-box d-box-d" x="476" y="674" width="160" height="58" rx="7"/>
+      <text class="d-name" x="556" y="698" text-anchor="middle">downloads</text>
+      <text class="d-sub"  x="556" y="717" text-anchor="middle">same drive</text>
+
+      <rect class="d-box d-box-d" x="656" y="674" width="170" height="58" rx="7"/>
+      <text class="d-name" x="741" y="698" text-anchor="middle">backups</text>
+      <text class="d-sub"  x="741" y="717" text-anchor="middle">same drive</text>
+
+      <!-- sshd down the left margin to school-work -->
+      <path class="d-line d-line-d" d="M100 356 V 378 H 52 V 700 H 58" marker-end="url(#w-d)"/>
+      <text class="d-edge d-edge-d" x="62" y="640">read / write</text>
+
+      <!-- syncthing straight down -->
+      <path class="d-line d-line-d" d="M147 480 V 668" marker-end="url(#w-d)"/>
+      <text class="d-edge d-edge-d" x="157" y="580">read / write</text>
+
+      <!-- jellyfin, read-only, around the outside -->
+      <path class="d-line d-line-d d-dash" d="M700 450 H 680 V 642 H 420 V 668" marker-end="url(#w-d)"/>
+      <text class="d-edge d-edge-d" x="436" y="636">read-only — cannot delete media</text>
+
+      <!-- qbittorrent writes -->
+      <path class="d-line d-line-d" d="M556 604 V 668" marker-end="url(#w-d)"/>
+      <path class="d-line d-line-d" d="M470 604 L 350 668" marker-end="url(#w-d)"/>
+      <text class="d-edge d-edge-d" x="300" y="616">renames, then files</text>
+
+      <!-- nightly backup mirror -->
+      <path class="d-line d-line-d d-dash" d="M159 732 V 772 H 741 V 738" marker-end="url(#w-d)"/>
+      <text class="d-edge d-edge-d" x="330" y="766">nightly — bin/homie-backup, on a systemd timer</text>
+
+    </svg>
+    </div>
+    <figcaption>
+      Every arrow was verified by connecting, not inferred from configuration.
+    </figcaption>
+  </figure>
+
+  <h3>Three things the drawing makes obvious</h3>
+
+  <div class="cards cards-3">
+    <div class="card">
+      <h4>The amber path terminates at one box</h4>
+      <p>
+        Jellyfin is the only thing the house can reach, and that arrow never passes
+        through Caddy. Every other service is on a blue path or on no path at all.
+      </p>
+    </div>
+    <div class="card">
+      <h4>sshd sits outside every container</h4>
+      <p>
+        It connects straight to the disk, bypassing Docker and Caddy — which is why it
+        keeps working when both are broken. That independence is deliberate: it is the
+        way back in.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Two boxes share one drive</h4>
+      <p>
+        The library and its backup are both inside the <code>/mnt/t7</code> outline —
+        which the drawing shows better than prose can. It is the top entry in
+        <a href="operating-manual.html#gaps">the gap list</a>.
+      </p>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="lbl">The one arrow not drawn</span>
+    <p>
+      Syncthing’s sync port, <code>:22000</code>, is also open on the house WiFi. It is
+      safe there because every peer must be approved by device ID and it carries no
+      admin access — but it is a second thing listening on the amber interface, so it is
+      worth knowing about rather than discovering.
+    </p>
+  </div>
+</section>
+
+<section id="proxy">
+  <div class="sec-head"><span class="sec-num">02</span><h2>What Caddy actually changes</h2></div>
+  <p>The clearest way to see the point of a reverse proxy is to draw the same system without one.</p>
+
+  <figure>
+    <div class="figwrap">
+    <svg class="diagram" viewBox="0 0 1000 300" role="img"
+         aria-label="Comparison. On the left, without a reverse proxy, one client draws four separate encrypted connections to four services, each on its own port and each having to solve certificates independently. On the right, with Caddy, the client makes one encrypted connection to Caddy, which forwards to the same four services over plain HTTP on a private network.">
+      <defs>
+        <marker id="p-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+        <marker id="p-x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--alert)"/></marker>
+        <marker id="p-t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--tailnet)"/></marker>
+      </defs>
+
+      <!-- LEFT -->
+      <text class="d-zonelbl" x="20" y="24" style="fill:var(--alert)">without a reverse proxy</text>
+      <rect class="d-box d-box-a" x="20" y="110" width="110" height="46" rx="6"/>
+      <text class="d-name" x="75" y="138" text-anchor="middle">you</text>
+
+      <path class="d-line d-line-a" d="M130 122 H 300" marker-end="url(#p-x)"/>
+      <path class="d-line d-line-a" d="M130 130 H 300" marker-end="url(#p-x)"/>
+      <path class="d-line d-line-a" d="M130 138 H 300" marker-end="url(#p-x)"/>
+      <path class="d-line d-line-a" d="M130 146 H 300" marker-end="url(#p-x)"/>
+      <text class="d-edge d-edge-a" x="150" y="104">four connections, four certificates,</text>
+      <text class="d-edge d-edge-a" x="150" y="176">four renewal schedules, four chances to get it wrong</text>
+
+      <rect class="d-box d-box-a" x="304" y="44"  width="150" height="38" rx="6"/>
+      <text class="d-name" x="379" y="68" text-anchor="middle">Jellyfin</text>
+      <rect class="d-box d-box-a" x="304" y="94"  width="150" height="38" rx="6"/>
+      <text class="d-name" x="379" y="118" text-anchor="middle">Syncthing</text>
+      <rect class="d-box d-box-a" x="304" y="144" width="150" height="38" rx="6"/>
+      <text class="d-name" x="379" y="168" text-anchor="middle">qBittorrent</text>
+      <rect class="d-box d-box-a" x="304" y="194" width="150" height="38" rx="6"/>
+      <text class="d-name" x="379" y="218" text-anchor="middle">n8n</text>
+
+      <line x1="500" y1="20" x2="500" y2="280" stroke="var(--rule)" stroke-width="1" stroke-dasharray="4 4"/>
+
+      <!-- RIGHT -->
+      <text class="d-zonelbl" x="536" y="24" style="fill:var(--tailnet)">with Caddy</text>
+      <rect class="d-box d-box-t" x="536" y="110" width="100" height="46" rx="6"/>
+      <text class="d-name" x="586" y="138" text-anchor="middle">you</text>
+
+      <path class="d-line d-line-t" d="M636 133 H 690" marker-end="url(#p-t)"/>
+      <text class="d-edge d-edge-t" x="632" y="104">one HTTPS</text>
+      <text class="d-edge d-edge-t" x="632" y="176">connection</text>
+
+      <rect class="d-box d-box-t" x="694" y="106" width="100" height="54" rx="6"/>
+      <text class="d-name" x="744" y="130" text-anchor="middle">Caddy</text>
+      <text class="d-sub"  x="744" y="148" text-anchor="middle">one cert</text>
+
+      <path class="d-line" d="M794 128 H 830 V 63  H 860" marker-end="url(#p-a)"/>
+      <path class="d-line" d="M794 131 H 830 V 113 H 860" marker-end="url(#p-a)"/>
+      <path class="d-line" d="M794 136 H 830 V 163 H 860" marker-end="url(#p-a)"/>
+      <path class="d-line" d="M794 139 H 830 V 213 H 860" marker-end="url(#p-a)"/>
+      <text class="d-edge" x="700" y="196">plain HTTP, never leaves the machine</text>
+
+      <rect class="d-box" x="864" y="44"  width="116" height="38" rx="6"/>
+      <text class="d-name" x="922" y="68" text-anchor="middle">Jellyfin</text>
+      <rect class="d-box" x="864" y="94"  width="116" height="38" rx="6"/>
+      <text class="d-name" x="922" y="118" text-anchor="middle">Syncthing</text>
+      <rect class="d-box" x="864" y="144" width="116" height="38" rx="6"/>
+      <text class="d-name" x="922" y="168" text-anchor="middle">qBittorrent</text>
+      <rect class="d-box" x="864" y="194" width="116" height="38" rx="6"/>
+      <text class="d-name" x="922" y="218" text-anchor="middle">n8n</text>
+    </svg>
+    </div>
+    <figcaption>
+      The difference is <em>where encryption lives</em>. On the left it is a problem each
+      service solves separately; on the right it is solved once, at the door.
+    </figcaption>
+  </figure>
+
+  <p>
+    The prediction has been tested twice. Adding the downloader meant one Caddy block and
+    one more port on an existing certificate; adding n8n meant the same again. Neither
+    was a new security decision.
+  </p>
+
+  <div class="cards cards-3">
+    <div class="card">
+      <h4>Why SSH is drawn outside</h4>
+      <p>
+        It runs on the host, not in a container, so it needs neither Docker’s port
+        forwarding nor Caddy’s routing. That is the way back in when something else is
+        broken.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Why the TV skips Caddy</h4>
+      <p>
+        Routing it through Caddy would mean installing a certificate on every roommate
+        device. Instead that traffic stays on the house network in plain HTTP, where the
+        WiFi’s own encryption covers it.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Why two boxes have no address</h4>
+      <p>
+        n8n and ollama publish no host port at all — Caddy and n8n reach them by
+        container name. A port that is never published cannot be published to the wrong
+        interface.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Why qBittorrent has no interface</h4>
+      <p>
+        It shares gluetun’s namespace rather than having its own, so the tunnel is the
+        only way out. A dead tunnel means no connection at all, rather than a fallback to
+        the house line.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Why one arrow is read-only</h4>
+      <p>
+        Jellyfin can read the library but not change it, so no bug can delete it. The
+        cost is no subtitle downloads and no metadata sidecars — and it matters more now
+        that backups live on the same drive.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Why the backup arrow is dashed</h4>
+      <p>
+        It is not a live connection. A systemd timer runs
+        <code>bin/homie-backup</code> nightly; the rest of the time that path does not
+        exist.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span>homie · companion to <a href="architecture.html">Architecture</a> and <a href="networking.html">Networking</a></span>
+  <span>Verified against the running system 20 Sep 2026</span>
+</footer>
+
+</div>
+</body>
+</html>

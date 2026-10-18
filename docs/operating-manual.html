@@ -1,0 +1,874 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>homie — operating manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="homie.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="nav">
+  <a class="nav-home" href="index.html">homie docs</a>
+  <a href="operating-manual.html" aria-current="page">Operating manual</a>
+  <a href="architecture.html">Architecture</a>
+  <a href="networking.html">Networking</a>
+  <a href="wiring-diagram.html">Wiring diagram</a>
+</nav>
+
+<header class="masthead">
+  <div class="eyebrow">Operating manual · Rev. 2026-09-20</div>
+  <h1>Running homie</h1>
+  <p class="standfirst">
+    How to watch things, sync files, get in from outside, tell whether anything is
+    wrong, and restart it without breaking it. Written for the people who <em>use</em>
+    the machine, not the person who built it.
+  </p>
+  <div class="facts">
+    <div><div class="lbl">Machine</div><div class="val">ThinkPad T470</div></div>
+    <div><div class="lbl">House address</div><div class="val mono">192.168.1.10</div></div>
+    <div><div class="lbl">Tailnet name</div><div class="val mono">homie.tailnet-name.ts.net</div></div>
+    <div><div class="lbl">Library on</div><div class="val">the T7 external SSD</div></div>
+  </div>
+</header>
+
+<section id="contents">
+  <ol>
+    <li><a href="#doors">Which door you are using</a></li>
+    <li><a href="#watch">Watching movies &amp; TV</a></li>
+    <li><a href="#add">Adding to the library</a></li>
+    <li><a href="#sync">Syncing your files</a></li>
+    <li><a href="#remote">Getting in from outside</a></li>
+    <li><a href="#health">Checking it is healthy</a></li>
+    <li><a href="#tunnel-diag">If the tunnel “works” but nothing connects</a></li>
+    <li><a href="#gaps">What does not work yet</a></li>
+    <li><a href="#restart">Turning it off and on</a></li>
+    <li><a href="#update">Updating without breaking it</a></li>
+    <li><a href="#quickref">Quick reference</a></li>
+  </ol>
+</section>
+
+<section id="doors">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Which door you are using</h2></div>
+  <p>
+    Everything makes more sense once you know there are two ways in, and that which one
+    you are using decides what you can reach.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Door</th><th>Who gets in</th><th>What it reaches</th><th>Encrypted?</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag tag-lan">the LAN</span><br>Home WiFi</td>
+          <td>Anyone on the house WiFi</td>
+          <td>Media only</td>
+          <td>No — plain HTTP</td></tr>
+      <tr><td><span class="tag tag-tailnet">the tailnet</span><br>Tailscale</td>
+          <td>Only devices the owner approved</td>
+          <td>Everything, from anywhere in the world</td>
+          <td>Yes — real HTTPS</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    Roommates use the first door and never need to install anything. The second exists so
+    the owner can reach the machine from outside the house without opening a single port
+    on the router. <a href="architecture.html#doors">Architecture §02</a> explains why it
+    is built this way.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">Why this matters to you</span>
+    <p>
+      On the home WiFi, your Jellyfin password travels unencrypted. The WiFi password
+      protects it from the street, but not from other people in the house.
+      <strong>Use a throwaway password here</strong> — never one you use anywhere else.
+    </p>
+  </div>
+</section>
+
+<section id="watch">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Watching movies &amp; TV</h2></div>
+
+  <h3>From the house</h3>
+  <div class="addr addr-lan">
+    <span class="lbl">Jellyfin · home WiFi</span>
+    <span class="val">http://192.168.1.10:8096</span>
+  </div>
+  <p>
+    Sign in with the account you were given. Everyone gets their own login, so watch
+    history, resume points and preferences stay yours.
+  </p>
+
+  <h3>On a TV, phone or tablet</h3>
+  <p>The browser works, but the apps are better. Install one, then add the server manually when it asks:</p>
+  <div class="addr addr-lan">
+    <span class="lbl">Server address</span>
+    <span class="val">http://192.168.1.10:8096</span>
+  </div>
+  <ul>
+    <li><strong>Android TV / Fire TV</strong> — the official Jellyfin app, the best of the lot</li>
+    <li><strong>iPhone / iPad</strong> — Swiftfin</li>
+    <li><strong>Desktop</strong> — Jellyfin Media Player, or just the browser</li>
+  </ul>
+
+  <h3>What to expect while watching</h3>
+  <p>
+    The server converts video on the fly when your device cannot play a file directly.
+    That conversion runs on a dedicated video chip rather than the processor, which is
+    roughly three times faster and leaves the machine responsive for everyone else.
+  </p>
+  <p>
+    It is not unlimited — this is a laptop. Two people converting at once is fine; four
+    is pushing it. If playback stutters, lower the quality in the player’s gear menu;
+    that often lets your device play the file directly instead, which uses almost no
+    server power at all.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">If the library looks empty, check the cable</span>
+    <p>
+      Everything you can watch lives on an external drive. If that drive is unplugged the
+      media server <em>refuses to start</em> rather than showing an empty library — so
+      “Jellyfin will not load” and “the drive came loose” look like the same problem.
+      <a href="#health">The health check</a> tells you which in one line.
+    </p>
+  </div>
+</section>
+
+<section id="add">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Adding to the library</h2></div>
+  <p>
+    Jellyfin works out what a file is almost entirely from its name and folder. Get the
+    name right and the poster, cast and synopsis appear on their own within a minute. Get
+    it wrong and you get a bare filename with no artwork — and no amount of rescanning
+    fixes it.
+  </p>
+
+  <h3>The naming rules</h3>
+<pre><code>/mnt/t7/Movies/Title (Year)/Title (Year).mp4
+/mnt/t7/TV/Title (Year)/Season 02/Title (Year) - S02E01 - Episode Name.mp4</code></pre>
+  <p>
+    Season and episode numbers are two digits. Gaps are fine — a missing episode 3 stays
+    missing rather than renumbering everything after it.
+  </p>
+
+  <h3>The usual way — let it file itself</h3>
+  <p>
+    Add a torrent in qBittorrent, set its category to <code>tv</code> or
+    <code>movies</code>, and that is the whole job. When it finishes, the file is renamed
+    to the pattern above, moved into the library, and removed from the download list.
+  </p>
+  <div class="addr">
+    <span class="lbl">qBittorrent · Tailscale only</span>
+    <span class="val">https://homie.tailnet-name.ts.net:8444</span>
+  </div>
+  <p>The category is the only field that matters. Everything else is already configured.</p>
+
+  <div class="note">
+    <span class="lbl">If something does not appear</span>
+    <p>
+      The filer refuses to guess. If it cannot tell which show a release belongs to, it
+      leaves the file exactly where it is and writes the reason — plus the one line you
+      need to add to <code>series-map.conf</code> — to its log:
+    </p>
+    <p><code>~/homeserver/config/qbittorrent/qbt-file.log</code></p>
+    <p>
+      To see <em>why</em> it decided what it did — what the name parsed to, whether
+      <code>series-map.conf</code> matched —
+      ask with a few words from the title. It finds the download, works out its category,
+      and replays the filing as a dry run with the reasoning switched on. Nothing moves:
+    </p>
+<pre><code>bin/qbt-why big buck bunny
+bin/qbt-why --as movies sintel     # for a download added without a category</code></pre>
+    <p>
+      “0 kept as video” on a folder that is already in the library means it is leftovers —
+      artwork, a <code>.txt</code>, a <code>Subs/</code> folder — which the filer leaves behind
+      on purpose.
+    </p>
+    <p>
+      If a filed torrent is still sitting in qBittorrent's list, <code>bin/qbt-forget
+      &lt;hash&gt;</code> takes it off without touching its files.
+    </p>
+    <p>
+      That is by design. A file that waits is easy to fix; a file misnamed into the wrong
+      show is not.
+    </p>
+  </div>
+
+  <h3>The manual way</h3>
+  <p>
+    For anything that did not arrive as a torrent — a file from a friend’s drive, or one
+    copied over SFTP — a helper script does the naming so it cannot be got wrong by hand:
+  </p>
+<pre><code>addmedia movie ~/inbox/somefilm.mp4 "Some Film" 1954
+addmedia show  ~/inbox/ep1.mp4 "Some Show" 1961 2 1 "Episode Name"</code></pre>
+  <p>
+    It builds the folder structure, moves the file into place, and nudges Jellyfin to
+    scan. It also refuses to run at all if the external drive is unplugged, rather than
+    filing your video somewhere that will vanish when the drive comes back.
+  </p>
+
+  <h3>Getting files onto the server by hand</h3>
+  <div class="addr addr-lan">
+    <span class="lbl">SFTP · from the house</span>
+    <span class="val">sftp://admin@192.168.1.10</span>
+  </div>
+  <p>Any file transfer app works — Cyberduck, FileZilla, or the <code>scp</code> command.</p>
+
+  <div class="note note-warn">
+    <span class="lbl">Files cannot be deleted from inside Jellyfin</span>
+    <p>
+      The media folder is mounted read-only on purpose, so a bug or a mis-set option
+      cannot erase the collection. Deleting something means removing the file directly
+      over SFTP. A little inconvenience, in exchange for a library that cannot delete
+      itself.
+    </p>
+  </div>
+</section>
+
+<section id="sync">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Syncing your files</h2></div>
+  <p>
+    Syncthing keeps a folder identical across your devices. Change a file on your laptop
+    and the server has it moments later — no cloud service, no subscription, and the
+    files never touch anyone else’s computer.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Folder</th><th>On the server</th><th>Paired devices</th></tr></thead>
+    <tbody>
+      <tr><td><code>school-work</code></td><td><code>~/data/school-work</code></td>
+          <td>homie, admin MacBook</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Adding another device</h3>
+  <ol class="steps">
+    <li><p>Install Syncthing on the new device and open its web page.</p></li>
+    <li><p>Find <strong>Actions → Show ID</strong> and copy the long device ID.</p></li>
+    <li>
+      <p>
+        On homie’s Syncthing, choose <strong>Add Remote Device</strong>, paste that ID,
+        then open the <strong>Sharing</strong> tab and tick <code>school-work</code>.
+      </p>
+      <p>
+        <strong>Skipping that tick is the single most common mistake</strong> — the
+        device pairs but nothing ever syncs.
+      </p>
+    </li>
+    <li>
+      <p>
+        Back on the new device, accept both prompts: one to trust homie, one to accept
+        the folder. Choose where the folder should live locally.
+      </p>
+    </li>
+  </ol>
+  <p>
+    Pairing is mutual — both sides must agree. That is why the sync port can sit open on
+    the house network safely: an unknown device can knock, but nothing transfers until
+    someone approves it by ID.
+  </p>
+
+  <div class="note note-ok">
+    <span class="lbl">Deleted something by accident?</span>
+    <p>
+      Old versions of every changed or deleted file are kept on the server for 365 days
+      in a hidden <code>.stversions</code> folder inside the synced directory. Deleting a
+      file on your laptop does not destroy it here.
+    </p>
+  </div>
+
+  <div class="note note-warn">
+    <span class="lbl">Syncing is not backing up</span>
+    <p>
+      Versioning protects you from your own mistakes. It does not protect you from a disk
+      failing — that would take every version with it. There is a real backup as well,
+      running nightly (see <a href="#health">§06</a>), but read
+      <a href="#gaps">what it does and does not cover</a> before relying on it.
+    </p>
+  </div>
+</section>
+
+<section id="remote">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Getting in from outside</h2></div>
+  <p>
+    Tailscale builds a small private network between approved devices. They can talk to
+    each other from anywhere — a café, campus, another country — as if they were on the
+    same WiFi. Nothing is exposed to the public internet and no ports are forwarded on
+    the router.
+  </p>
+  <p>Once a device is on it, these work from anywhere:</p>
+
+  <div class="addr"><span class="lbl">Jellyfin</span><span class="val">https://homie.tailnet-name.ts.net</span></div>
+  <div class="addr"><span class="lbl">Syncthing admin</span><span class="val">https://homie.tailnet-name.ts.net:8443</span></div>
+  <div class="addr"><span class="lbl">qBittorrent</span><span class="val">https://homie.tailnet-name.ts.net:8444</span></div>
+  <div class="addr"><span class="lbl">n8n editor</span><span class="val">https://homie.tailnet-name.ts.net:8445</span></div>
+  <div class="addr"><span class="lbl">Terminal</span><span class="val">ssh admin@homie.tailnet-name.ts.net</span></div>
+
+  <p>
+    Those carry genuine certificates issued to the machine’s name and renewed
+    automatically, so browsers show a normal padlock with nothing to click past.
+  </p>
+
+  <h3>These documentation pages</h3>
+  <p>
+    The docs are the one exception — they are served on <code>127.0.0.1</code> only, so
+    they need an SSH tunnel rather than a tailnet address:
+  </p>
+<pre><code>ssh -L 8446:localhost:8446 homie-lan
+# then open http://localhost:8446</code></pre>
+  <p>
+    <a href="architecture.html#docs-localhost">Why it is bound that way.</a> In a terminal,
+    <code>bin/homie-docs</code> renders any page as text instead.
+  </p>
+
+  <div class="note note-ok">
+    <span class="lbl">Working from the MacBook since 2026-09-20</span>
+    <p>
+      These addresses timed out from the Mac for weeks. The cause was never on either
+      machine: the tailnet’s ACL policy granted only exit-node access and nothing
+      device-to-device, so both nodes correctly dropped every real packet while
+      handshakes kept succeeding. Fixed by adding an allow rule in the admin console —
+      see <a href="#tunnel-diag">the diagnosis</a> if it ever recurs.
+    </p>
+  </div>
+</section>
+
+<section id="health">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Checking it is healthy</h2></div>
+  <p>
+    One command answers “is anything wrong?”. It only reads — it cannot change or break
+    anything, so run it whenever you are curious.
+  </p>
+<pre><code>~/homeserver/bin/homie-check</code></pre>
+  <p>Thirty-nine assertions, grouped. What it covers:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Group</th><th>What you want to see</th></tr></thead>
+    <tbody>
+      <tr><td>Containers</td><td>All seven up, and the ones with health checks healthy</td></tr>
+      <tr><td>Port exposure</td><td>Media reachable on the house WiFi; every admin page not.
+          Re-tested by connecting, because Docker bypasses the firewall</td></tr>
+      <tr><td>Memory limits</td><td>Every container capped, and none near its ceiling</td></tr>
+      <tr><td>Downloader</td><td>Password set, filing hook armed, and
+          <strong>qBittorrent’s egress is the VPN, never the home address</strong></td></tr>
+      <tr><td>Jellyfin config</td><td>Hardware acceleration on, throttling on, proxies declared</td></tr>
+      <tr><td>Library &amp; disk</td><td>T7 mounted with free space; more than zero items indexed</td></tr>
+      <tr><td>Live transcode</td><td>Whether a playback happening <em>right now</em> is using
+          the video chip or the processor</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    The live-transcode row is the useful one: start something playing, run the check
+    again, and it tells you whether the conversion actually landed on the video chip. A
+    setting being switched on does not guarantee it is being used.
+  </p>
+
+  <h3>The automation stack has its own check</h3>
+<pre><code>~/homeserver/bin/homie-automation-check</code></pre>
+  <p>
+    It checks n8n and ollama, then reads the workflow state database <em>directly</em>
+    rather than asking n8n — so “n8n is dead” is not reported by a dead n8n. It emails on
+    failure once SMTP is configured.
+  </p>
+  <p>
+    A workflow that has never run reports as information, not as a failure — an absence is
+    not a fault when the thing was never built. Once a workflow <em>has</em> run, it gets a
+    deadline: roughly 1.5× its interval, so one missed run is tolerated and two in a row are
+    not.
+  </p>
+
+  <h3>What runs on a schedule</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Timer</th><th>When</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td><code>homie-backup.timer</code></td><td>Nightly, 03:30 (+ up to 15 min jitter)</td>
+          <td>Mirrors <code>~/data/school-work</code> and archives the repo’s
+              gitignored config onto the T7. Keeps 7 archives</td></tr>
+      <tr><td><code>homie-automation-check.timer</code></td><td>Every 6 hours, at :45</td>
+          <td>The automation check above, emailing if something is stale or down</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Both are <code>Persistent=true</code>, so a run missed while the machine was off
+    happens on the next boot rather than being silently skipped. Confirm with
+    <code>systemctl list-timers 'homie-*'</code>.
+  </p>
+
+  <h3>When something is broken — where the logs are</h3>
+  <p>Health checks tell you <em>that</em> something is wrong. Logs tell you why.</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>When this misbehaves</th><th>Look here</th><th>What you will find</th></tr></thead>
+    <tbody>
+      <tr><td>Any service won’t start,<br>keeps restarting</td>
+          <td><code>docker logs NAME --tail 100</code></td>
+          <td>Startup errors, crashes, config it refused. <code>NAME</code> is jellyfin,
+              syncthing, caddy, gluetun, qbittorrent, n8n or ollama</td></tr>
+      <tr><td>Playback stutters,<br>won’t play, no artwork</td>
+          <td><code>docker logs jellyfin --tail 100</code><br>
+              <code>config/jellyfin/config/log/</code></td>
+          <td>Docker shows the recent picture; the log folder keeps a dated file per day,
+              which is what you want for something that happened yesterday</td></tr>
+      <tr><td>A web address times out,<br>or 502s</td>
+          <td><code>docker logs caddy --tail 50</code></td>
+          <td>Every request and every certificate renewal. A 502 means Caddy is fine and
+              the service behind it is not — check that service next</td></tr>
+      <tr><td>The VPN, downloads stalled</td>
+          <td><code>docker logs gluetun --tail 50</code></td>
+          <td>Tunnel connects, healthcheck failures, which server it picked. First place
+              to look when downloads stop for no reason</td></tr>
+      <tr><td>Torrents won’t connect</td>
+          <td><code>docker logs qbittorrent --tail 50</code><br>
+              <code>config/qbittorrent/qBittorrent/logs/</code></td>
+          <td>qBittorrent keeps and rotates its own log; the real reason for a refused
+              connection is usually only in there, not in the web page</td></tr>
+      <tr><td>A download didn’t appear<br>in the library</td>
+          <td><code>config/qbittorrent/qbt-file.log</code></td>
+          <td>The filing script writes here every run, including the reason it refused to
+              guess and the line to add to <code>series-map.conf</code></td></tr>
+      <tr><td>A device won’t pair</td>
+          <td><code>docker logs syncthing --tail 50</code></td>
+          <td>Connection attempts and rejections, by device ID</td></tr>
+      <tr><td>An automation didn’t run</td>
+          <td><code>docker compose logs -f n8n</code><br><code>bin/homie-automation-check</code></td>
+          <td>n8n’s own execution errors; the check reports which workflow is stale</td></tr>
+      <tr><td>The whole machine —<br>drive vanished, boot problem</td>
+          <td><code>journalctl -b -p err</code><br><code>dmesg | tail -30</code></td>
+          <td>Kernel and system errors. This is where a disconnected T7 shows up</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <span class="lbl">Two flags worth knowing</span>
+    <p>
+      <code>--tail 50</code> shows the last 50 lines instead of the entire history.
+      <code>-f</code> follows the log live, so you can watch what happens while you
+      reproduce the problem — <code>docker logs -f caddy</code>, then load the page that
+      fails. <kbd>Ctrl+C</kbd> stops watching.
+    </p>
+  </div>
+</section>
+
+<section id="tunnel-diag">
+  <div class="sec-head"><span class="sec-num">06b</span><h2>If the tunnel “works” but nothing connects</h2></div>
+  <p>
+    This cost three wrong diagnoses across three sessions, so the test that actually
+    settles it is written down here.
+  </p>
+  <p>
+    <strong><code>tailscale ping</code> is not <code>ping</code>.</strong> A
+    <code>tailscale ping</code> is answered by the Tailscale daemon itself, in userspace,
+    before the packet ever reaches the operating system or the tailnet’s own packet
+    filter. It proves the two machines have negotiated a WireGuard session — and nothing
+    more. Ordinary <code>ping</code> has to survive the whole path, so it is the honest
+    test:
+  </p>
+<pre><code>tailscale ping stevens-macbook-air   # succeeds even when everything real is broken
+ping -c3 100.64.0.20              # this is the one that tells you the truth</code></pre>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Symptom</th><th>Where to look</th></tr></thead>
+    <tbody>
+      <tr><td>Both succeed</td><td>Networking is fine. Look at the service and its port.</td></tr>
+      <tr><td><code>tailscale ping</code> works, <code>ping</code> does not, <strong>in both directions</strong></td>
+          <td><strong>The tailnet ACL.</strong> Run <code>tailscale debug netmap</code> and read
+              <code>PacketFilterRules</code> — if it is empty, this node accepts nothing from
+              any peer, and no amount of poking at either machine will help. Fix it at
+              <code>login.tailscale.com/admin/acls</code>.</td></tr>
+      <tr><td>Fails one direction only</td><td>A host firewall. On homie that is
+              <code>ufw</code>; on macOS, System Settings → Network → Firewall, or
+              Tailscale’s own “allow incoming connections”.</td></tr>
+      <tr><td>Name fails, IP works</td><td>MagicDNS. Check the route to
+              <code>100.100.100.100</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note note-warn">
+    <span class="lbl">The trap that caused the wrong diagnoses</span>
+    <p>
+      <code>autogroup:internet</code> in an ACL does <em>not</em> mean “the internet is
+      allowed”. It means “may route out through an exit node”. A policy containing only
+      <code>autogroup:internet</code> destinations grants no device-to-device access at
+      all, which is exactly what had happened here — and it compiles to an empty packet
+      filter rather than to an error.
+    </p>
+  </div>
+</section>
+
+<section id="gaps">
+  <div class="sec-head"><span class="sec-num">07</span><h2>What does not work yet</h2></div>
+  <p>
+    Stated plainly, so nobody wastes an afternoon on a known gap. This is the one place
+    in the documentation where these are listed; the other pages link here.
+  </p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Item</th><th>Status</th><th>What it means for you</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Backups share one drive</strong></td>
+          <td><span class="tag tag-gap">Real risk</span></td>
+          <td>Backups sit on the same external SSD as the media. That protects against
+              deleting a file by accident — not against the drive failing, which would
+              take both copies at once. <em>The biggest open gap here.</em></td></tr>
+      <tr><td><strong>Everything depends on one cable</strong></td>
+          <td><span class="tag tag-gap">Single point</span></td>
+          <td>Media and backups both live on the T7. Unplug it and there is nothing to
+              watch and nowhere to back up to.</td></tr>
+      <tr><td><strong>The n8n encryption key exists in one place</strong></td>
+          <td><span class="tag tag-gap">Back it up</span></td>
+          <td>It encrypts every stored credential. Lose it and they are not “log in
+              again”, they are unrecoverable. It is in <code>.env</code>, captured by the
+              nightly backup — which is on the same drive. Keep a copy off-box.</td></tr>
+      <tr><td><strong>School automations</strong></td>
+          <td><span class="tag">Zero workflows</span></td>
+          <td>n8n and ollama run and are healthy, but no workflow is built yet; each
+              needs a credential fetched by hand.</td></tr>
+      <tr><td><strong>Roommate accounts</strong></td>
+          <td><span class="tag">One made</span></td>
+          <td>Two Jellyfin accounts exist: the owner’s and one roommate’s. Any other
+              roommate still needs one created.</td></tr>
+      <tr><td><strong>Most folders have messy names</strong></td>
+          <td><span class="tag">Cosmetic</span></td>
+          <td>Most shows and films still sit in raw release-name folders. Newly filed
+              episodes use the clean naming, so a show can briefly appear twice in
+              Jellyfin until the old folder is renamed.</td></tr>
+      <tr><td><strong>Media passwords on WiFi</strong></td>
+          <td><span class="tag">Accepted trade</span></td>
+          <td>Unencrypted inside the house, so roommates need no setup. Use throwaway
+              passwords.</td></tr>
+      <tr><td><strong>Newest video format (AV1)</strong></td>
+          <td><span class="tag">No hardware support</span></td>
+          <td>This chip predates it. AV1 files fall back to the processor and may
+              stutter.</td></tr>
+      <tr><td><strong>Searching for things to download</strong></td>
+          <td><span class="tag">By hand</span></td>
+          <td>Downloading and filing are automatic; finding a release still means going
+              and looking for one.</td></tr>
+      <tr><td><strong>New episodes are not fetched on their own</strong></td>
+          <td><span class="tag">Not built</span></td>
+          <td>Nothing watches your shows for you. When a new episode airs, you go and get
+              it.</td></tr>
+      <tr><td><strong>Downloads cannot accept incoming peers</strong></td>
+          <td><span class="tag tag-ok">By design</span></td>
+          <td>The VPN hides the home address and offers no way for strangers to connect
+              in. Downloads are unaffected; you just share back to fewer people.
+              qBittorrent shows a red “not connectable” dot, and that is expected —
+              <a href="networking.html#inbound">why</a>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="restart">
+  <div class="sec-head"><span class="sec-num">08</span><h2>Turning it off and on</h2></div>
+  <p>
+    homie is a laptop that runs all the time. Mostly you never touch this — services
+    restart themselves after a power cut, and the whole stack comes back when the machine
+    boots. You need this section for three situations: the machine has to move, one
+    service is misbehaving, or you changed something and need it to take effect.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">The one rule that matters</span>
+    <p>
+      <strong>Never yank the power.</strong> Downloads are mid-write and the media drive
+      is exFAT, which is unforgiving about interrupted writes. Always shut down properly
+      and wait for the machine to go quiet before unplugging anything.
+    </p>
+  </div>
+
+  <h3>Restarting one service</h3>
+  <p>Almost always the right move — it leaves everything else running. From <code>~/homeserver</code>:</p>
+<pre><code>docker compose restart jellyfin     # or syncthing, caddy, n8n, ollama
+sleep 10 &amp;&amp; bin/homie-check</code></pre>
+
+  <div class="note note-warn">
+    <span class="lbl">The VPN is the exception — two steps, always, in this order</span>
+    <p>
+      qBittorrent has no network of its own; it lives inside the VPN container. Restart
+      or update <code>gluetun</code> and qBittorrent is left connected to nothing — it
+      looks fine and can reach nothing at all. It must be <em>rebuilt</em> afterwards, not
+      merely restarted:
+    </p>
+<pre><code>docker compose up -d --force-recreate gluetun
+docker compose up -d --force-recreate qbittorrent</code></pre>
+    <p>
+      Always both, always in that order. <code>homie-check</code> catches it if you
+      forget: it will say qBittorrent has no egress.
+    </p>
+  </div>
+
+  <h3>Restarting everything</h3>
+  <ol class="steps">
+    <li><p><code>cd ~/homeserver</code></p></li>
+    <li><p><code>docker compose down</code> — stops all seven containers. Data, settings
+        and library are untouched; only the running containers go away.</p></li>
+    <li><p><code>docker compose up -d</code> — brings them back, in dependency order.</p></li>
+    <li><p><code>bin/homie-check</code> — expect every check to pass.</p></li>
+  </ol>
+  <p>
+    Because <code>down</code> removes the containers and <code>up</code> creates fresh
+    ones, the VPN two-step is handled automatically here. That is why a full cycle is
+    sometimes simpler than fixing one service.
+  </p>
+
+  <h3>Shutting the machine down</h3>
+  <ol class="steps">
+    <li><p>If anything is downloading, pause it in qBittorrent and let the current pieces finish writing.</p></li>
+    <li><p><code>cd ~/homeserver &amp;&amp; docker compose down</code> — stops services cleanly
+        rather than having them killed mid-write by the shutdown.</p></li>
+    <li><p><code>sudo shutdown -h now</code> — needs your password.</p></li>
+    <li><p>Wait until the power light is off before moving or unplugging it. If the T7 is
+        coming too, unplug it only after the machine is fully off.</p></li>
+  </ol>
+
+  <h3>Starting it back up</h3>
+  <ol class="steps">
+    <li><p><strong>Plug the T7 in first</strong>, then power on the laptop. This order
+        matters: the media containers deliberately refuse to start if the drive is
+        missing, so a missing drive is a loud failure instead of an empty library.</p></li>
+    <li><p>Everything starts by itself — Docker restores all seven containers. Nothing to type.</p></li>
+    <li><p><code>bin/homie-check</code> to confirm, once you can reach it.</p></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">If containers did not come back</span>
+    <p>
+      Nearly always the T7 was not mounted at boot. Check <code>ls /mnt/t7</code> — if it
+      is empty, mount the drive, then
+      <code>cd ~/homeserver &amp;&amp; docker compose up -d</code>.
+    </p>
+  </div>
+</section>
+
+<section id="update">
+  <div class="sec-head"><span class="sec-num">09</span><h2>Updating without breaking it</h2></div>
+  <p>
+    Every service is pinned to an exact version on purpose. Nothing updates itself and
+    nothing changes underneath you, which means an update is always something you chose,
+    on a day you chose it, and can undo.
+  </p>
+
+  <div class="note note-info">
+    <span class="lbl">Why not just use “latest”?</span>
+    <p>
+      <code>latest</code> is a moving pointer, not a version. With it, the next restart
+      could quietly install a different program, and a break would arrive at random with
+      no record of what changed. Pinned versions turn upgrades into a decision with a
+      date attached.
+    </p>
+  </div>
+
+  <h3>Updating one service</h3>
+  <ol class="steps">
+    <li>
+      <p><strong>Check it is healthy first.</strong> Never start an update from a broken
+        state — you will not know afterwards which problem you were looking at.</p>
+      <pre><code>bin/homie-check</code></pre>
+    </li>
+    <li><p><strong>Pick a real version.</strong> Look up the image’s releases and read what
+        changed. A version number, never <code>latest</code>.</p></li>
+    <li><p><strong>Edit one line.</strong> In <code>docker-compose.yml</code>, change that
+        service’s <code>image:</code> tag. Leave the comment recording the old digest —
+        that is your way back.</p></li>
+    <li>
+      <p><strong>Apply it to that service only.</strong></p>
+      <pre><code>docker compose up -d jellyfin</code></pre>
+    </li>
+    <li>
+      <p><strong>Verify twice.</strong> Run the health check, then actually use the thing —
+        play a video, open the page. A passing check is not the same as a working app.</p>
+      <pre><code>bin/homie-check</code></pre>
+    </li>
+    <li>
+      <p><strong>Commit it,</strong> saying what moved from what to what. This is what
+        makes rolling back possible.</p>
+      <pre><code>git add -A &amp;&amp; git commit</code></pre>
+    </li>
+  </ol>
+
+  <h3>Undoing an update</h3>
+  <p>
+    Because the version lives in a committed file, rolling back is editing that line back
+    and re-running <code>docker compose up -d</code>. Or, if the commit contained nothing
+    else, <code>git revert</code> it and apply. Config and data are separate from the
+    container, so downgrading does not lose anything — with one caveat.
+  </p>
+
+  <div class="note note-warn">
+    <span class="lbl">Read this before a big version jump</span>
+    <p>
+      Some apps upgrade their own settings or database on first start, and once that has
+      happened the old version may refuse to read them. Jellyfin especially. Before a
+      jump like 10.11 → 10.12, run <code>bin/homie-backup</code> and skim the release
+      notes for anything about migrations. Small point releases are safe; major ones
+      deserve five minutes of reading.
+    </p>
+  </div>
+
+  <h3>Updating the VPN container</h3>
+  <p>Same as above, plus the two-step from §08 — a rebuilt gluetun always needs qBittorrent rebuilt after it:</p>
+<pre><code>docker compose up -d --force-recreate gluetun
+docker compose up -d --force-recreate qbittorrent
+bin/homie-check</code></pre>
+  <p>
+    The line to look for reads <em>qBittorrent egress is the VPN</em>. If it names the
+    home address instead, stop and fix it before downloading anything.
+  </p>
+
+  <h3>Updating n8n</h3>
+  <p>
+    Same procedure, with one thing to check first: <strong>never change
+    <code>N8N_ENCRYPTION_KEY</code>.</strong> Every stored credential is encrypted with
+    it, and a new key turns them into unrecoverable ciphertext rather than a re-login.
+    n8n also occasionally changes defaults between versions and warns at startup; the
+    compose file pins those explicitly, so read its startup log after an upgrade.
+  </p>
+
+  <h3>Updating Ubuntu itself</h3>
+<pre><code>sudo apt update &amp;&amp; sudo apt upgrade</code></pre>
+  <p>
+    Separate from the services, which carry their own dependencies inside their
+    containers. If it installs a new kernel it will want a reboot — use the shutdown
+    steps in §08, and remember everything comes back on its own afterwards.
+  </p>
+
+  <div class="note">
+    <span class="lbl">A sane rhythm</span>
+    <p>
+      There is no schedule to keep. Patch the operating system when you think of it,
+      update a service when you want something it fixed or when a security note says to,
+      and do one thing at a time — so that if something breaks, you know what did it.
+    </p>
+  </div>
+</section>
+
+<section id="quickref">
+  <div class="sec-head"><span class="sec-num">10</span><h2>Quick reference</h2></div>
+
+  <h3>Addresses</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>What</th><th>Address</th><th>Works from</th></tr></thead>
+    <tbody>
+      <tr><td>Watch media</td><td><code>http://192.168.1.10:8096</code></td><td>House WiFi</td></tr>
+      <tr><td>Watch media (secure)</td><td><code>https://homie.tailnet-name.ts.net</code></td><td>Tailnet</td></tr>
+      <tr><td>Syncthing admin</td><td><code>https://homie.tailnet-name.ts.net:8443</code></td><td>Tailnet</td></tr>
+      <tr><td>Downloads</td><td><code>https://homie.tailnet-name.ts.net:8444</code></td><td>Tailnet</td></tr>
+      <tr><td>n8n editor</td><td><code>https://homie.tailnet-name.ts.net:8445</code></td><td>Tailnet</td></tr>
+      <tr><td>These docs</td><td><code>http://localhost:8446</code></td><td>An SSH tunnel only</td></tr>
+      <tr><td>Terminal</td><td><code>ssh admin@192.168.1.10</code></td><td>House WiFi</td></tr>
+      <tr><td>File transfer</td><td><code>sftp://admin@192.168.1.10</code></td><td>House WiFi</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><a href="networking.html#reach">The full reachability table</a>, including what the public internet can reach (nothing).</p>
+
+  <h3>Where things live</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Contents</th><th>Path on the server</th></tr></thead>
+    <tbody>
+      <tr><td>Films</td><td><code>/mnt/t7/Movies</code></td></tr>
+      <tr><td>TV</td><td><code>/mnt/t7/TV</code></td></tr>
+      <tr><td>Downloads in progress</td><td><code>/mnt/t7/downloads</code></td></tr>
+      <tr><td>Backups</td><td><code>/mnt/t7/backups</code></td></tr>
+      <tr><td>Which show goes in which folder</td><td><code>~/homeserver/hooks/series-map.conf</code></td></tr>
+      <tr><td>Filing log — read when a download does not appear</td><td><code>~/homeserver/config/qbittorrent/qbt-file.log</code></td></tr>
+      <tr><td>Synced school &amp; work files</td><td><code>~/data/school-work</code></td></tr>
+      <tr><td>Recovered old file versions</td><td><code>~/data/school-work/.stversions</code></td></tr>
+      <tr><td>Service configuration</td><td><code>~/homeserver</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Commands</h3>
+  <p>Run these from <code>~/homeserver</code>. Anything taking arguments shows them; the rest take none.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Command</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td><code>bin/homie-check</code></td><td>Full health check — read-only, safe any time</td></tr>
+      <tr><td><code>bin/homie-automation-check</code></td><td>Just the automation stack and workflow freshness</td></tr>
+      <tr><td><code>bin/homie-docs</code></td><td>Read any of these pages as text. <code>--search TERM</code> greps them all</td></tr>
+      <tr><td><code>bin/homie-backup</code></td><td>Back up synced files and server settings to the T7. Also runs nightly</td></tr>
+      <tr><td><code>bin/canvas-preview</code></td><td>Show what a Canvas feed would sync. Changes nothing</td></tr>
+      <tr><td><code>bin/addmedia movie FILE "Title" YEAR</code></td>
+          <td>File one film by hand<br><code>bin/addmedia movie ~/inbox/f.mkv "Some Film" 1954</code></td></tr>
+      <tr><td><code>bin/addmedia show FILE "Title" YEAR S E "Ep"</code></td>
+          <td>File one episode<br><code>bin/addmedia show ~/inbox/e.mkv "Some Show" 1961 2 1 "Ep Name"</code></td></tr>
+      <tr><td><code>docker ps</code></td><td>Which services are running</td></tr>
+      <tr><td><code>docker compose down</code></td><td>Stop everything. Data is untouched</td></tr>
+      <tr><td><code>docker compose up -d</code></td><td>Start everything back up</td></tr>
+      <tr><td><code>docker compose restart NAME</code></td><td>Restart one — but see §08 for the VPN exception</td></tr>
+      <tr><td><code>docker logs NAME --tail 50</code></td><td>Recent output from one service</td></tr>
+      <tr><td><code>systemctl list-timers 'homie-*'</code></td><td>When the scheduled jobs last ran and next will</td></tr>
+      <tr><td><code>sudo shutdown -h now</code></td><td>Power the machine off properly</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Secrets, and what git never sees</h3>
+  <p>
+    There is no password manager here — there is a placement rule. Anything secret lives
+    in a file git is told to ignore, and the repo carries a template naming what is needed
+    without containing it.
+  </p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Path</th><th>Holds</th><th>In git?</th></tr></thead>
+    <tbody>
+      <tr><td><code>.env</code></td>
+          <td>The real values: user IDs, timezone, the tailnet address, the qBittorrent
+              login, the NordVPN key, n8n’s encryption key, and the automation
+              credentials</td>
+          <td>Ignored</td></tr>
+      <tr><td><code>.env.example</code></td>
+          <td>The same variable names with empty values, so the repo says what is needed
+              without leaking it</td>
+          <td>Committed</td></tr>
+      <tr><td><code>config/</code></td>
+          <td>Live state: Jellyfin’s user database, Syncthing’s private key, Caddy’s
+              certificates, qBittorrent’s password hash, n8n’s encrypted credentials</td>
+          <td>Ignored</td></tr>
+      <tr><td><code>data/</code>, <code>backups/</code></td>
+          <td>Your files and the backup archives</td>
+          <td>Ignored</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Passwords are stored by each service rather than by us: Jellyfin keeps its own in its
+    database, qBittorrent keeps a hash, Syncthing hashes its web login. Nothing here
+    stores a plaintext password except <code>.env</code>, which holds the qBittorrent
+    login because the filing script has to log in as you.
+  </p>
+</section>
+
+<footer>
+  <span>homie · <span class="mono">192.168.1.10</span> · <span class="mono">100.64.0.10</span></span>
+  <span>Rev. 2026-09-20 — describes the system as verified on that date, including what does not work</span>
+</footer>
+
+</div>
+</body>
+</html>

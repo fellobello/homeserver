@@ -1,0 +1,19 @@
+# Secrets and host-specific values (.env.example IS committed as a template)
+.env
+
+# Runtime service state: databases, caches, TLS private keys, API keys.
+# Syncthing's key.pem and Caddy's cert store live here — never commit.
+config/
+
+# Media and synced files (they actually live in ~/data, but belt and braces)
+data/
+
+# Config backups taken before risky edits
+backups/
+
+# Python bytecode from bin/ scripts
+__pycache__/
+*.pyc
+
+# Real data pulled for building evals stays local; only redacted fixtures are committed.
+tests/fixtures/real/
